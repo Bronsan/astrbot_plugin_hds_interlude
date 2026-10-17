@@ -110,6 +110,7 @@ class AstrMessageEvent:
         components: Any = None,
     ):
         self.message_str = message_str
+        self._platform_id = "p1"
         self._sender_id = sender_id
         self._sender_name = sender_name
         self._self_id = self_id
@@ -123,6 +124,9 @@ class AstrMessageEvent:
 
     def get_platform_name(self) -> str:
         return self._platform
+
+    def get_platform_id(self) -> str:
+        return self._platform_id
 
     def get_self_id(self) -> str:
         return self._self_id

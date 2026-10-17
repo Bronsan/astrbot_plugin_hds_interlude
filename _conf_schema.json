@@ -1,6 +1,6 @@
 {
   "presetSync": {
-    "description": "【预设入口】从 typ0.space 直接拉取角色人设/配置；默认关闭。",
+    "description": "【预设入口】Type0 预设：插件加载时直连分享站拉取角色人设/配置，不依赖桌面端。",
     "type": "object",
     "items": {
       "enabled": {
@@ -14,12 +14,17 @@
         "default": "https://typ0.space"
       },
       "shareCode": {
-        "description": "8 位分享码（大小写均可，可带连字符）。",
+        "description": "分享码（也可直接粘贴完整链接到上一项）。",
+        "type": "string",
+        "default": ""
+      },
+      "shareUrl": {
+        "description": "完整分享链接（可选，优先级高于分享码；支持 /p/<code> 或 ?code=）。",
         "type": "string",
         "default": ""
       },
       "autoUpdate": {
-        "description": "重载时检查远端 revision，有新版本才应用。",
+        "description": "插件加载时直连分享站检查 revision，有新版本才应用（首次导入也会执行）。",
         "type": "bool",
         "default": false
       },
@@ -195,7 +200,7 @@
         "default": "你正在持续创作一部以主角为中心的现实主义生活剧本，每次推进约400多字，可长可短，重点展现变化。\n\n每次写作时，请先感受主角在这段真实时间里正在经历怎样的生活：她的日程、行动、身体状态、心情、环境、正在处理的事情，以及与周围人物之间自然流动的关系。让剧本从这些真实而具体的生活质感中展开。\n\n用户消息是发生在当前时刻的一项外部事件。把它自然放入（如没有注意到/无条件注意也可不放入）主角原本正在继续的现实中，结合她当下的处境、注意力、情绪和人与人之间的关系，呈现这条消息带来的影响。主角可以很快注意到，也可以在完成手头的事、与别人相处、整理情绪或改变计划后才处理它。\n\n为当前时间段补充一些属于主角自己的生活内容，例如丰富感的日常事务、与身边人的小互动、工作或学业、兴趣、身体感受、心理想法、偶遇、配角互动、临时变化、尚未解决的小事、环境细节或内在念头。让这些内容与既有剧情保持因果和连续性，并自然留下后续的空间。\n\n鼓励生活保留适度的不确定性与变化：突变可能发生，计划可能调整，邀约可能出现，配角能带来新的情绪或信息，旧问题也可能以平静的方式重新浮现。事件保持克制、可信，并让主角的选择具有现实动机。\n\n主角遇到有意思与想要分享/诉苦的事情，完全可以选择主动联系熟悉的用户。\n\n采用贴近主角的第三人称限知视角，一部持续上演的话剧。外部事件丰富度高、叙事连贯，关注主角心理、具体行动、人物来往、情绪余波与关系的缓慢变化。\n\n叙事推进至当前时刻结束。可以保留正在进行的事情、未说出口的念头、尚未解决的关系线索和未来意图；请将已经发生的内容写得完整而自然。\n\n主角线上聊天喜欢用简洁和省字数的方式交流。"
       },
       "vision": {
-        "description": "图片理解设置。",
+        "description": "图片理解：native 直接随主请求送图并支持 detail/maxImageDimension；sidecar 用独立视觉连接转事实观察。",
         "type": "object",
         "items": {
           "enabled": {
@@ -264,7 +269,7 @@
         }
       },
       "embedding": {
-        "description": "Embedding 语义检索。",
+        "description": "Embedding 语义检索：liveQuery 用于实时事实加权，backfillBatchSize 控制后台补齐向量（需勾选 useForEmbedding）。",
         "type": "object",
         "items": {
           "enabled": {
@@ -626,7 +631,7 @@
         "default": []
       },
       "forwardMessage": {
-        "description": "QQ 合并转发读取预算（OneBot 平台扩展）。",
+        "description": "QQ 合并转发读取预算：适配器已展开时直接解析，只有 Forward id 时经平台 API 拉取。",
         "type": "object",
         "items": {
           "enabled": {
@@ -654,7 +659,7 @@
     }
   },
   "urge": {
-    "description": "【节奏 6】Urge 弹性推进（保留项：本移植沿用固定间隔调度，尚未接入 Urge 算法）。",
+    "description": "【节奏 6】Urge 弹性推进：按生活节奏、对话密度、休息窗口与 burst 窗口计算下一次推进。总开关仍是 runtime.autoAdvanceEnabled。",
     "type": "object",
     "items": {
       "enabled": {
@@ -672,6 +677,97 @@
           "custom"
         ],
         "default": "medium"
+      },
+      "advanced": {
+        "description": "高级：推进区间与 burst 参数（留空使用所选频率档的预设）。",
+        "type": "object",
+        "items": {
+          "hotMin": {
+            "description": "高频区间下限（分钟）。",
+            "type": "int",
+            "default": 10
+          },
+          "hotMax": {
+            "description": "高频区间上限（分钟）。",
+            "type": "int",
+            "default": 20
+          },
+          "idleMin": {
+            "description": "平常区间下限（分钟）。",
+            "type": "int",
+            "default": 35
+          },
+          "idleMax": {
+            "description": "平常区间上限（分钟）。",
+            "type": "int",
+            "default": 55
+          },
+          "burstMin": {
+            "description": "burst 首个间隔下限（分钟）。",
+            "type": "int",
+            "default": 3
+          },
+          "burstMax": {
+            "description": "burst 首个间隔上限（分钟）。",
+            "type": "int",
+            "default": 7
+          },
+          "slowMin": {
+            "description": "慢速区间下限（分钟）。",
+            "type": "int",
+            "default": 110
+          },
+          "slowMax": {
+            "description": "慢速区间上限（分钟）。",
+            "type": "int",
+            "default": 130
+          },
+          "halfLifeMinutes": {
+            "description": "对话密度半衰期（分钟）。",
+            "type": "int",
+            "default": 90
+          },
+          "burstThreshold": {
+            "description": "触发 burst 的意愿阈值（0-1）。",
+            "type": "float",
+            "default": 0.75
+          },
+          "jitter": {
+            "description": "意愿值抖动比例（0-1）。",
+            "type": "float",
+            "default": 0.15
+          },
+          "extremeChance": {
+            "description": "出现极端意愿值的概率（0-1）。",
+            "type": "float",
+            "default": 0.03
+          },
+          "burstTtlMinutes": {
+            "description": "burst 窗口时长（分钟）。",
+            "type": "int",
+            "default": 35
+          },
+          "burstBudget": {
+            "description": "burst 窗口内最多连续推进次数。",
+            "type": "int",
+            "default": 3
+          },
+          "burstContactMinMinutes": {
+            "description": "burst 内两次联系的最小间隔（分钟）。",
+            "type": "int",
+            "default": 5
+          },
+          "activeMultiplier": {
+            "description": "对话密度最大加速倍数。",
+            "type": "float",
+            "default": 1.4
+          },
+          "restMultiplier": {
+            "description": "休息窗口的减速倍数。",
+            "type": "float",
+            "default": 0.6
+          }
+        }
       },
       "proactiveWillingnessThreshold": {
         "description": "仅 Urge 开启时生效；Agency strict 模式使用，natural/balanced 模式改用 agency.naturalWillingnessThreshold（调这里不生效）。不是发送概率。",
@@ -727,7 +823,7 @@
     }
   },
   "timelineDirector": {
-    "description": "【节奏 8】时间导演（保留项：本移植已实现 narrator.plan_timeline，但尚未接线到自动回合）。",
+    "description": "【节奏 8】时间导演：自动回合先生成相对时间账本，再交给主叙事写作；失败时自动降级。",
     "type": "object",
     "items": {
       "enabled": {
@@ -789,7 +885,7 @@
     }
   },
   "chatActions": {
-    "description": "【表达 10】聊天动作：引用、反应与 QQ 原生表情（保留项：解析与账本已就绪，投递未接入）。",
+    "description": "【表达 10】聊天动作：原生小表情、本地表情包、群消息回应（需适配器支持 set_msg_emoji_like）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -798,7 +894,7 @@
         "default": false
       },
       "quoteReply": {
-        "description": "允许引用回复。",
+        "description": "允许引用回复触发消息（Reply 组件）；关闭后只发纯文本。",
         "type": "bool",
         "default": true
       },
@@ -826,11 +922,24 @@
           "sweat",
           "awkward"
         ]
+      },
+      "allowedReactions": {
+        "description": "允许的消息回应类型（仅群聊；需适配器支持 set_msg_emoji_like）。",
+        "type": "list",
+        "default": [
+          "like",
+          "smile",
+          "laugh",
+          "heart",
+          "surprised",
+          "sad",
+          "angry"
+        ]
       }
     }
   },
   "stickers": {
-    "description": "【表达 11】本地表情包（保留项：本移植未接入素材扫描、描述与发送）。",
+    "description": "【表达 11】本地表情包：扫描目录并把真实 assetId 提供给主模型（按文件名/相对路径匹配）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1108,7 +1217,7 @@
     }
   },
   "browser": {
-    "description": "【扩展 14】网页观察（本移植未接入；配置保留，默认关闭）。",
+    "description": "【扩展 14】网页观察：内置 httpx 搜索/访问、正文提取与缓存，不依赖外部浏览器服务。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1117,7 +1226,7 @@
         "default": false
       },
       "mode": {
-        "description": "deferred-only 延后浏览；allow-immediate 允许即时浏览。",
+        "description": "deferred-only 回合后执行；allow-immediate 允许模型提出即时请求（本移植仍在本回合结束后执行，结果下一轮生效）。",
         "type": "string",
         "options": [
           "deferred-only",
@@ -1156,7 +1265,7 @@
         "default": 12000
       },
       "maxExcerptCharacters": {
-        "description": "单条网页观察送给主模型的最大字符数。",
+        "description": "单条观察进入下一轮上下文的最大字符数。",
         "type": "int",
         "default": 3000
       },
@@ -1250,7 +1359,7 @@
     }
   },
   "longHorizon": {
-    "description": "【扩展 17】长线叙事指导（实验，保留项：本移植未迁移，见 README）。",
+    "description": "【扩展 17】长线叙事指导（保留项：本移植未迁移，见 README）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1333,7 +1442,7 @@
     }
   },
   "logging": {
-    "description": "【维护 20】日志：级别与隐私预览（AstrBot 日志接管实际输出）。",
+    "description": "【维护 20】日志：级别阈值与内容预览开关（输出仍经 AstrBot logger）。",
     "type": "object",
     "items": {
       "level": {
@@ -1366,7 +1475,7 @@
     }
   },
   "mainPromptOverride": {
-    "description": "高级：系统主提示词的顶层覆盖（留空使用内置默认；出问题清空即可恢复）。",
+    "description": "高级：系统主提示词的顶层覆盖，优先级高于「模型中心 → mainPrompt」；留空使用内置默认。",
     "type": "text",
     "default": ""
   }

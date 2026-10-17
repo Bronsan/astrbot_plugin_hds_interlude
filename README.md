@@ -8,12 +8,85 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.1.2`，AstrBot `>=4.16,<5`
-- 依赖：`httpx`（模型请求）；数据存储使用 Python 标准库 `sqlite3`（无需额外数据库服务）
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.2.0`，AstrBot `>=4.16,<5`
+- 依赖：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
 
 ---
 
-## 版本与本次更新（v0.1.2 / 上游 rc57）
+## 版本与本次更新（v0.2.0 / Type0 内置 + 平台能力补齐）
+
+本版做两件事：把 Type0 预设导入真正内置到插件设置里，并用 AstrBot/平台官方接口
+补齐此前"只能标 cancelled"的能力。
+
+### 1）Type0 预设内置（不依赖桌面端）
+
+- `presetSync` 现在是完整的 Type0 入口：填分享码或完整链接（`shareUrl`），插件**加载时**
+  直接通过 HTTP 访问 `baseUrl`，按 revision 去重后应用配置，不需要 typ-0 桌面端或任何外部平台。
+- 首次导入、版本更新、手动 `interlude.preset.sync` 共用同一条路径；失败只记日志，不影响插件启动。
+- `interlude.preset.status` 可查看最近应用的分享码、revision 与分区。
+
+### 2）用 AstrBot/平台官方接口补齐能力
+
+| 能力 | 之前 | 现在 |
+| --- | --- | --- |
+| 合并转发（仅 `Forward` 引用） | 只有占位文本 | 通过平台客户端 `get_forward_msg` 二次拉取，解析 OneBot 消息段并遵守节点/层数/字符预算 |
+| 群消息回应 | 无 API，账本 `cancelled` | 通过 `set_msg_emoji_like` 投递；`messageRef`/`messageId` 进入群上下文，按 `allowedReactions` 过滤 |
+| 语音 SILK | 直接交给模型，无法识别 | 用 AstrBot 自带 `silk-python` 解码为 24k WAV 再送模型；缺库/解码失败自动降级 |
+| 图片理解 | 只统计 `imageCount` | native 模式把图片作为 `image_url` 随主请求发送；支持 `detail`；用 Pillow 按 `maxImageDimension` 缩放 |
+| 网页观察 | 配置保留、无实现 | 内置 httpx 搜索/访问、正文提取、域名白/黑名单与私网拦截、缓存表、`webContext` 注入 |
+| 群回合动作 | 只有文字 | 原生表情/表情包/回应在群回合也落账并投递 |
+
+说明：`browser.mode=allow-immediate` 仍在本回合结束后执行（结果下一轮生效）；
+真正的"写剧本前即时浏览"需要两次模型调用，暂不做。
+
+---
+
+## 版本与本次更新（v0.1.4 / typ-0 等价修复）
+
+AstrBot 没有 typ-0 桌面桥接，所以上游 rc53/rc56 的桌面修复不能逐行照搬。
+本版把其中**可迁移的协议语义**映射到 AstrBot 原生通道；桌面壳本身仍需在 Koishi 侧更新。
+
+| 上游 typ-0 修复 | 本移植的等价实现 | 行为 |
+| --- | --- | --- |
+| 宿主 `unknown` 回执被误判为确定失败 | `DeliveryUnknown` → 账本 `pending`；群消息 metadata 记 `pending` + `deliveryReason` | 私聊、群聊、平台动作都不再把"可能已送达"记成失败，也不自动重发 |
+| 实时回复片段数组逗号拼接 | AstrBot 用 `MessageChain` 组件而非字符串序列化 | 结构上不存在逗号拼接问题，无需移植 |
+| `replyTo`（触发消息 ID）随投递透传 | 入站记 `metadata.messageId`；`chatActions.quoteReply` 开启时首条气泡带 `Reply(id=...)`；延迟/分段意图保存 `replyTo` | 角色回复会真正引用触发它的那条消息；关掉 `quoteReply` 即恢复纯文本 |
+| 桌面桥接 45s 确认超时 | `TRANSPORT_TIMEOUT_SECONDS = 30` + `_is_unknown_delivery_error` | 超时/桥接关闭统一走 `unknown`，不会无限阻塞回合 |
+| 表情包回源 realpath 加固 | `_sticker_files` 用 `realpath` + `commonpath` 双侧边界 | root 内的符号链接/junction 指向目录外时直接跳过并告警 |
+
+不适用于本移植：桌面壳 `session.send` 的数组拼接、宿主侧 `settleDelivery`、typ-0 的
+`intentKey` 幂等去重（AstrBot 投递链没有该宿主层）。
+
+---
+
+## 版本与本次更新（v0.1.3 / 修复"无法迁移"项）
+
+v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不依赖外部服务**的部分，
+并把仍然受阻的条目收敛为"只差你提供一项输入"的清单（见第 7 节）。
+
+| 修复对象 | 原受阻原因 | 本次实现 | 预期行为 |
+| --- | --- | --- | --- |
+| `mainPromptOverride` | 顶层配置从未被读取 | `narrator.decide` 在 `model.mainPrompt` 为空时读取顶层覆盖 | 设置后进入系统提示词；留空回退内置默认 |
+| 群回合缓冲 | 按 `storyId` 聚合，多群互相覆盖 | 键改为 `(storyId, groupId)`；每故事一把串行锁；群刷写只等私聊回合，不等其它群 | 两个群同时说话各自合并、各自回复；顺带修复了群批次互相等待导致永不刷写的死锁 |
+| 端点路由 | 只写注册表，投递固定用 `participant.channelId` | 入站登记 `umo`/账号到端点表并记录 `preferredEndpointId`；投递、分段、延迟消息统一走端点 | 同一用户换账号/适配器后，消息从最近一次真实会话发出 |
+| QQ 原生小表情 | 账本有 segment，无投递 | `Face` 组件投递 + 语义→face id 映射 + `allowedNativeFaces` 校验 | 允许的表情真实发出；未登记语义标记 `cancelled` 并写原因 |
+| 本地表情包 | 无素材扫描、无发送 | 扫描 `stickers.directory`、把真实 `assetId` 注入提示词、`Image`/`Record` 发送 | 模型只引用存在的素材；缺失素材 `cancelled`，不再永久 `pending` |
+| 消息回应（reaction） | AstrBot 无对应 API | 检测不到 `send_reaction` 时直接记 `cancelled` + `unsupported` 原因 | 账本不再留下无法解释的 `pending` |
+| 合并转发读取 | `runtime.forwardMessage` 未读 | `Nodes`/`Node` 递归展开，遵守 `maxNodes`/`maxDepth`/`maxCharacters` | 适配器已展开的转发正文进入剧本；只有 `Forward` 引用时保留占位 |
+| 时间导演 | `plan_timeline` 无调用方 | 自动回合（advance / intent-due）调用并写入 `request.timelinePlan`，`carry` 回写故事状态 | 自动推进带相对时间账本；失败/关闭时无账本照常推进 |
+| Urge 弹性推进 | 只有配置 | 新增 `core/urge.py`：频率预设、区间、密度半衰期、上膛/确认/burst、休息与生活节奏乘数 | `urge.enabled` 后按弹性间隔推进，不再固定 40 分钟 |
+| 日志配置 | `logging` 整组未应用 | `_log` 按 `logging.level` 过滤；`logScriptPreview`/`logMessageContent`/`previewLength` 控制内容预览 | 级别与隐私开关真正生效 |
+| `maxStoriesPerSweep` | 只处理 canonical story | `sweep` 按最近更新遍历活跃故事，最多 N 个 | 多故事并存时后台任务不再只服务一个故事 |
+| 天气两个开关 | `autoFromLocation`/`skipFantasyWorld` 未读 | 架空世界关键词跳过；按 `story.location` 调 Open-Meteo 地理编码并缓存 | 异世界可跳过真实天气；地点变化自动解析观测点 |
+| 侧端识图 | `describe_visual` 未接线 | `vision.mode=sidecar` 时把图片转成事实观察，主叙事只读文字 | 无视觉主模型也能理解图片内容 |
+| Embedding 语义检索 | `embed_text/_cosine` 无调用 | `liveQuery` 时按当前用户文本加权事实排序；后台按 `backfillBatchSize` 补齐向量 | 有 `useForEmbedding` 连接时事实召回更准；无连接自动降级规则排序 |
+
+仍受平台能力限制、需要你补充输入的条目见第 7 节（QQ 空间、浏览器、SILK 转码、
+仅 `Forward` 引用的转发、消息回应 API）。
+
+---
+
+## 上一版更新记录（v0.1.2 / 上游 rc57）
 
 本版把移植基线从 `rc56` 提升到 `rc57`，重点是**单场景长故事的 Overlay 演化修复**、
 **投递现实投影压缩**与**上下文/重试默认值下调**。rc57 中仅涉及 Koishi 部署向导、
@@ -279,19 +352,25 @@ interlude.status        /interlude.status        interlude status
 | `script/*` 提交 / 账本 / 标记解析 | `core/script_engine.py` | 简化（say 标记、提交、账本、投递现实完整；SceneFrame/DialogueBurst 未迁移） |
 | `script/delivery-reality.ts` 投递现实投影 | `core/script_engine.py` `delivery_reality_projection` | 完整（rc57：12 码点 head、回执时钟、字符预算） |
 | `script/development.ts` 状态演化证据 | `core/service.py` `state_patch_evidence` | 简化（回合/跨日/场景证据；未实现 development 候选累积） |
-| `forward-message.ts` 合并转发读取 | 预留（需 aiocqhttp 平台层调用 `get_forward_msg`） | 未迁移 |
+| `forward-message.ts` 合并转发读取 | `main._extract_forward_text` | 完整（`Nodes`/`Node` 直接展开；`Forward` 引用经平台 `get_forward_msg` 拉取） |
 | `share-sync.ts` 分享码同步 | `core/share_sync.py` | 简化（分区差异预览为字段级；18 个分区含 `weather`） |
-| `endpoints.ts` 端点注册表 | `service.py` 端点子集 + 表 | 简化 |
+| `endpoints.ts` 端点注册表 | `service.py` 端点子集 + 表 | 简化（入站登记 + `preferredEndpointId` 投递路由；别名仍只读） |
 | `qzone.ts` QQ 空间 | 命令保留，通道探测返回不可用 | 未迁移（依赖外部扩展） |
-| `browser` 网页观察（Puppeteer） | 配置保留，行为未接入 | 未迁移 |
+| `browser` 网页观察 | `service` 内置 httpx 搜索/访问 + 正文提取 + 域名/私网策略 + 缓存 | 完整（deferred；allow-immediate 仍在回合后执行） |
 | `world-seeder.ts` 世界事件播种 | `service.py` `world_seeder_sweep` | 完整（简版提示词） |
 | `weather.ts` 运行时天气 | `service.py` `weather_sweep`（Open-Meteo） | 完整 |
 | `long-arc.ts` 长线指导 | 配置保留 | 未迁移（实验特性） |
-| `urge.ts` 弹性推进 | 固定间隔调度 + `urge.enabled` 保留 | 简化（调度沿用 runtime 固定间隔） |
+| 时间导演 | `service._plan_timeline` + `narrator.plan_timeline` | 完整（自动回合；失败降级） |
+| 日志分层 | `main._log` + `logging.*` | 简化（级别 + 内容预览；无独立文件/轮转） |
+| 图片理解 | `narrator` native `image_url` + `describe_visual` | 完整（native 送图；sidecar 需 `useForVision`；含 detail/缩放） |
+| 语音 SILK | `PluginTransport.fetch_audio_base64` | 完整（`silk-python` 解码为 WAV；缺库降级） |
+| Embedding 检索 | `service.embed_text` + 后台补齐 | 简化（`liveQuery` 事实加权；`semanticHistory` 仍保留） |
+| `urge.ts` 弹性推进 | `core/urge.py`（逐条移植） | 完整（默认关闭；开启后替代固定间隔） |
 | `chatRhythm` 节奏反定型 | — | 未迁移（上游已弃用） |
 | 实验性流式首条回复 | — | 未迁移 |
 | 模型特化块（specialization） | 配置未暴露 | 未迁移 |
-| 表情包 / 原生表情发送 | 配置与账本保留，投递未接入 | 简化 |
+| 表情包 / 原生表情 / 消息回应 | `service._deliver_platform_actions` + `PluginTransport.send_face/send_media/send_reaction` | 完整（回应走平台 `set_msg_emoji_like`） |
+| 群回合动作 | `service._deliver_group_platform_actions` | 完整（原生表情/表情包/回应均落账并投递） |
 
 #### 关于提示词
 
@@ -316,19 +395,41 @@ interlude.status        /interlude.status        interlude status
 - 主动与延迟投递：`context.send_message(unified_msg_origin, MessageChain)`（分段投递带打字模拟与抖动）。
 - 图片/语音采集：消息组件 `Image` / `Record`；`vision.enabled` 时以 data URI 交给多模态主模型（图片不落库）。
 - 数据目录：`StarTools.get_data_dir()`（`data/plugin_data/astrbot_plugin_hds_interlude/`），卸载重装不丢数据。
+- 平台扩展：`context.get_platform_inst(...).get_client()` → `get_forward_msg`（转发）、`set_msg_emoji_like`（回应）。
+- 媒体处理：AstrBot 自带 `Pillow`（图片缩放）与 `silk-python`（SILK 解码），缺失时自动降级。
 
-## 7. 无法迁移 / 需要你额外提供的部分
+## 7. 仍受阻 / 需要你额外提供的部分
 
-| 项目 | 说明 | 配置方式 |
-| --- | --- | --- |
-| **模型 API Key** | 主叙事必须至少一条 OpenAI 兼容连接；压缩 / Alter / Embedding / 识图可选 | 「模型中心」`providersJson`（第 4.1 节） |
-| **QQ / OneBot 连接** | 私聊白名单与机器人账号校验依赖平台侧配置 | 「QQ 接入」`onebot.*`；平台本身用 AstrBot 的 aiocqhttp 适配器接入 |
-| **QQ 空间通道** | 上游经 SnowLuma 扩展动作发说说/评论/点赞。本移植的平台层探测恒为不可用；`interlude.qzone` 会明确提示 | 需要自行实现 `PluginTransport.qzone_available` / `qzone_execute`（对接支持空间动作的适配器） |
-| **合并转发读取** | 需要 aiocqhttp 客户端调用 `get_forward_msg`；当前未接入 | 在 `main.py` 的 `PluginTransport` 中扩展（`event.bot.api.call_action`） |
-| **网页观察（浏览器）** | 上游需要 Koishi Puppeteer 服务；AstrBot 无内置等价物 | 未接入；如需可对接外部浏览器服务后实现 `browser` 分支 |
-| **语音转码** | 上游经 SnowLuma 把 QQ SILK 语音转码后交给模型。本移植直接读取 `Record` 组件的文件/URL，SILK 原样无法被模型理解 | 平台侧先转码（mp3 最稳），或将语音留作文字占位 |
-| **Embedding** | 可选。留空 `endpoint` 时从 Chat 地址推导 `/embeddings` | 「模型中心」勾选 `useForEmbedding` 的连接 |
-| **typ0-site 分享站** | `preset.*` 命令默认访问 `https://typ0.space`；自建站可用 `--base` 参数或 `HDSI_SHARE_BASE` 环境变量 | `presetSync.baseUrl` |
+本版已把浏览器、合并转发、消息回应、SILK、图片理解都做进插件；剩下这些
+确实需要外部输入或属于实验特性。
+
+| 项目 | 受阻原因 | 需要你提供 / 配置 | 配置方式 |
+| --- | --- | --- | --- |
+| **模型 API Key** | 主叙事必须至少一条 OpenAI 兼容连接；压缩 / Alter / Embedding / 识图可选 | 连接地址、Key、模型名 | 「模型中心」`providersJson`（第 4.1 节），勾选 `useForMain` 等用途 |
+| **QQ / OneBot 连接** | 私聊白名单与机器人账号校验依赖平台侧配置 | aiocqhttp 适配器 + 机器人 QQ + 用户白名单 | 「QQ 接入」`onebot.*` |
+| **Type0 分享站** | 内置导入通过 HTTP 访问 `baseUrl`，需要网络可达 | 可用的分享站地址或自建站 | `presetSync.baseUrl` / `HDSI_SHARE_BASE` |
+| **QQ 空间通道** | 上游经 SnowLuma 扩展动作发说说/评论/点赞；AstrBot 无内置等价 API | 一个能执行空间动作的适配器/网关 | 在 `main.py` 实现 `PluginTransport.qzone_available/qzone_execute`；当前 `interlude.qzone` 会明确提示不可用 |
+| **长线叙事（longHorizon）** | 只有配置与 `interlude_long_arc_*` 表，缺上游触发分/审查规范 | 上游触发与审查提示词，或授权按近似规则实现 | `longHorizon.*`；当前不产生行为 |
+| **流式首泡** | 结构化 JSON 与增量流式冲突，需要增量解析器 | 是否接受实验性开关 | 默认关闭；当前等完整 JSON |
+| **模型家族特化 / `specializationAutoTrim`** | 本移植提示词本身是上游子集 | 无（属于提示词工程差异） | 不提供该开关 |
+| **历史语义召回（`semanticHistory`）** | 当前只有实时事实加权与向量回填 | 需要历史片段的回填/召回策略 | `model.embedding.semanticHistory` 暂不生效 |
+| **真正的即时网页浏览** | `allow-immediate` 需要"先浏览、再写剧本"的两次模型调用 | 是否接受额外延迟与成本 | 当前 immediate 请求仍在回合后执行，结果下一轮生效 |
+
+### 7.1 已不再需要补充的能力
+
+以下能力现在只需要在配置页打开：
+
+- **Type0 预设**：`presetSync.enabled=true` + 分享码/`shareUrl` + `autoUpdate=true`（加载时自动导入）；
+- **原生小表情**：`chatActions.enabled=true` + `nativeFaces=true`；
+- **本地表情包**：`stickers.enabled=true` + 把图片放进 `stickers.directory`；
+- **群消息回应**：`chatActions.enabled=true` + `messageReactions=true` + `allowedReactions`；
+- **合并转发**：`runtime.forwardMessage.enabled=true`（默认开；`Forward` 引用走平台 `get_forward_msg`）；
+- **语音 SILK**：无需配置，`silk-python` 可用时自动解码；
+- **图片理解**：`model.vision.enabled=true`，native 直接送图，sidecar 需 `useForVision` 连接；
+- **网页观察**：`browser.enabled=true`（deferred-only，自带 httpx 与域名/私网策略）；
+- **弹性推进**：`urge.enabled=true`（可选 `urge.advanced` 微调）；
+- **时间导演**：`timelineDirector.enabled=true`（默认开）；
+- **语义检索**：`model.embedding.enabled=true` + `liveQuery=true` + `useForEmbedding` 连接。
 
 ## 8. 与 AstrBot 其它能力的边界
 
@@ -350,8 +451,8 @@ interlude.status        /interlude.status        interlude status
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 82 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
-python tests/plugin_harness_test.py  # 入口层 31 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面（AstrBot 桩）
+python tests/smoke_test.py           # 核心层 135 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
+python tests/plugin_harness_test.py  # 入口层 46 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面（AstrBot 桩）
 ```
 
 ## 11. 许可与致谢

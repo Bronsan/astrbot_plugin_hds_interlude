@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -22,7 +23,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from astrbot.api import logger as astrbot_logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import At, Image, Plain, Record, Reply
+from astrbot.api.message_components import At, Face, Image, Plain, Record, Reply
+
+try:  # pragma: no cover - 旧版 AstrBot 可能没有合并转发组件
+    from astrbot.api.message_components import Forward, Node, Nodes
+except ImportError:  # pragma: no cover
+    Forward = Node = Nodes = ()  # type: ignore[assignment]
 from astrbot.api.star import Context, Star, StarTools
 
 try:  # pragma: no cover - 兼容不同版本的注册装饰器
@@ -43,6 +49,7 @@ from .core.service import (
 from .core.share_sync import (
     build_config_patch,
     default_share_base,
+    extract_share_code,
     fetch_share,
     format_diff_lines,
     summarize_share,
@@ -51,7 +58,7 @@ from .core.timeutil import format_log_time, format_story_display_time
 from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "v0.1.2"
+PLUGIN_VERSION = "v0.2.0"
 
 #: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
 TRANSPORT_TIMEOUT_SECONDS = 30
@@ -94,22 +101,300 @@ def _text(value: Any) -> str:
     return str(value) if value is not None else ""
 
 
+def _decode_silk_to_wav(data: bytes) -> Optional[bytes]:
+    """SILK → WAV（AstrBot 自带 silk-python；不可用时返回 None）。"""
+    if not data:
+        return None
+    try:
+        import wave
+
+        import pysilk
+    except ImportError:
+        return None
+    try:
+        pcm = io.BytesIO()
+        pysilk.decode(io.BytesIO(data), pcm, 24000)
+        pcm.seek(0)
+        wav = io.BytesIO()
+        with wave.open(wav, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(24000)
+            handle.writeframes(pcm.read())
+        return wav.getvalue()
+    except Exception:  # noqa: BLE001 - 解码失败交给调用方降级
+        return None
+
+
+def _is_silk(data: bytes, extension: str = "") -> bool:
+    if extension.lower().lstrip(".") == "silk":
+        return True
+    return bool(data[:10].startswith(b"#!SILK"))
+
+
+def _resize_image_bytes(data: bytes, mime: str, max_dimension: int) -> Tuple[bytes, str]:
+    """按 `vision.maxImageDimension` 缩放图片（Pillow 缺失时原样返回）。"""
+    if max_dimension <= 0 or not data:
+        return data, mime
+    try:
+        from PIL import Image as PILImage
+    except ImportError:  # pragma: no cover - AstrBot 默认自带 Pillow
+        return data, mime
+    try:
+        image = PILImage.open(io.BytesIO(data))
+        image.load()
+        if max(image.size) <= max_dimension:
+            return data, mime
+        image.thumbnail((max_dimension, max_dimension))
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGBA")
+            background = PILImage.new("RGB", image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[-1])
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=88, optimize=True)
+        return buffer.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001 - 缩放失败不影响原图送入模型
+        return data, mime
+
+
+def _component_text(component: Any) -> str:
+    """把单个消息组件压成可读文本（合并转发展开用）。"""
+    if isinstance(component, Plain):
+        return _text(getattr(component, "text", ""))
+    if isinstance(component, Image):
+        return "[图片]"
+    if isinstance(component, Record):
+        return "[语音]"
+    if isinstance(component, At):
+        return f"@{_text(getattr(component, 'qq', ''))}"
+    return ""
+
+
+def _render_forward_nodes(
+    nodes: List[Any], depth: int, max_depth: int, counter: List[int], max_nodes: int
+) -> List[str]:
+    """递归展开合并转发节点（限制层数、节点数；图片/语音只留占位）。"""
+    lines: List[str] = []
+    for node in nodes:
+        if counter[0] >= max_nodes:
+            break
+        counter[0] += 1
+        name = _text(getattr(node, "name", "") or getattr(node, "uin", ""))
+        parts: List[str] = []
+        for child in getattr(node, "content", None) or []:
+            if Node and isinstance(child, Node):
+                if depth + 1 <= max_depth:
+                    parts.extend(_render_forward_nodes([child], depth + 1, max_depth, counter, max_nodes))
+                continue
+            if Nodes and isinstance(child, Nodes):
+                if depth + 1 <= max_depth:
+                    parts.extend(_render_forward_nodes(
+                        list(getattr(child, "nodes", None) or []), depth + 1, max_depth, counter, max_nodes
+                    ))
+                continue
+            parts.append(_component_text(child))
+        text = "".join(parts).strip()
+        if text:
+            lines.append(f"{name}: {text}" if name else text)
+    return lines
+
+
+def _onebot_segment_text(segment: Any) -> str:
+    """把 OneBot 消息段压成文本（`get_forward_msg` 返回值用）。"""
+    if not isinstance(segment, dict):
+        return ""
+    kind = str(segment.get("type") or "")
+    data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+    if kind == "text":
+        return _text(data.get("text"))
+    if kind == "image":
+        return "[图片]"
+    if kind == "record":
+        return "[语音]"
+    if kind == "face":
+        return "[表情]"
+    if kind == "at":
+        return f"@{_text(data.get('qq'))}"
+    if kind in ("forward", "node"):
+        return "[嵌套转发]"
+    return ""
+
+
+def _render_forward_payload(payload: Any, max_nodes: int, max_characters: int) -> str:
+    """解析 OneBot `get_forward_msg` 返回（兼容 data/messages 两种包装）。"""
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    messages = data.get("messages") or data.get("message") or []
+    if not isinstance(messages, list):
+        return ""
+    lines: List[str] = []
+    for item in messages[:max_nodes]:
+        if not isinstance(item, dict):
+            continue
+        sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+        name = _text(sender.get("card") or sender.get("nickname") or sender.get("user_id") or "")
+        content = item.get("message") or item.get("content") or []
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = "".join(_onebot_segment_text(segment) for segment in content)
+        else:
+            text = ""
+        text = text.strip()
+        if text:
+            lines.append(f"{name}: {text}" if name else text)
+    return "\n".join(lines)[:max_characters]
+
+
+async def _extract_forward_text(
+    messages: List[Any], config: Dict[str, Any], platform_client: Any = None
+) -> str:
+    """读取 QQ 合并转发的正文（对应 runtime.forwardMessage）。
+
+    - 适配器已展开为 `Nodes`/`Node`：递归展开并遵守节点/层数预算；
+    - 只有 `Forward` 引用：通过平台客户端 `get_forward_msg` 二次拉取；
+    - 平台不支持或拉取失败：保留可读占位，不丢事件。
+    """
+    if not config.get("enabled", True):
+        return ""
+    max_nodes = max(1, int(config.get("maxNodes") or 30))
+    max_depth = max(1, int(config.get("maxDepth") or 3))
+    max_characters = max(1, int(config.get("maxCharacters") or 2000))
+    counter = [0]
+    lines: List[str] = []
+    for component in messages:
+        if Nodes and isinstance(component, Nodes):
+            lines.extend(_render_forward_nodes(
+                list(getattr(component, "nodes", None) or []), 0, max_depth, counter, max_nodes
+            ))
+        elif Node and isinstance(component, Node):
+            lines.extend(_render_forward_nodes([component], 0, max_depth, counter, max_nodes))
+        elif Forward and isinstance(component, Forward):
+            rendered = ""
+            if platform_client is not None and hasattr(platform_client, "call_action"):
+                try:
+                    payload = await asyncio.wait_for(
+                        platform_client.call_action(
+                            "get_forward_msg", message_id=_text(getattr(component, "id", ""))
+                        ),
+                        timeout=10,
+                    )
+                    rendered = _render_forward_payload(
+                        payload, max_nodes - counter[0], max_characters
+                    )
+                except Exception as error:  # noqa: BLE001 - 拉取失败保留占位
+                    astrbot_logger.debug(f"{PLUGIN_NAME}: 合并转发拉取失败: {error}")
+            lines.append(rendered or "[合并转发：当前适配器未展开内容]")
+    return "\n".join(lines)[:max_characters]
+
+
 class PluginTransport:
     """平台层投递适配：把服务层的发送/取媒体需求映射到 AstrBot API。"""
 
     def __init__(self, plugin: "HDSInterludePlugin") -> None:
         self._plugin = plugin
 
-    async def send(self, umo: str, text: str) -> bool:
+    async def send(self, umo: str, text: str, reply_to: str = "") -> bool:
         """主动/延迟投递一条文本消息。
 
         返回 False 表示确定失败；回执超时/桥接关闭抛 `DeliveryUnknown`，
         由服务层把账本记为 pending 且不自动重试（对应上游 rc53/rc56）。
+        `reply_to` 非空时附带 `Reply` 组件（对应 typ-0 的 replyTo 透传）。
         """
         if not umo or not text:
             return False
+        components: List[Any] = []
+        if reply_to:
+            try:
+                components.append(Reply(id=reply_to))
+            except (TypeError, ValueError):
+                # 旧版组件只接受 sender/qq 字段：宁可退回纯文本，也不丢消息。
+                components = []
+        components.append(Plain(text))
+        return await self._send_chain(umo, MessageChain(components))
+
+    async def send_face(self, umo: str, face_id: str) -> bool:
+        """发送 QQ 原生小表情（`chatActions.nativeFaces`）。
+
+        `face_id` 由服务层的语义映射表给出；组件要求整数 id。
+        """
+        if not umo or not str(face_id).strip():
+            return False
         try:
-            chain = MessageChain([Plain(text)])
+            component = Face(id=int(face_id))
+        except (TypeError, ValueError):
+            return False
+        return await self._send_chain(umo, MessageChain([component]))
+
+    async def send_media(self, umo: str, path: str, kind: str = "image") -> bool:
+        """发送本地表情包/语音（`stickers.directory` 中的真实文件）。"""
+        if not umo or not path or not os.path.isfile(path):
+            return False
+        if kind == "audio":
+            try:
+                component = Record.fromFileSystem(path)
+            except AttributeError:  # pragma: no cover - 旧版 AstrBot 无该工厂方法
+                component = Record(file=path)
+        else:
+            try:
+                component = Image.fromFileSystem(path)
+            except AttributeError:  # pragma: no cover
+                component = Image(file=path)
+        return await self._send_chain(umo, MessageChain([component]))
+
+    def _client_for_umo(self, umo: str) -> Any:
+        """按 `unified_msg_origin` 找平台客户端（OneBot 的 CQHttp 实例）。"""
+        try:
+            platform_id = str(umo).split(":", 1)[0]
+            platform = self._plugin.context.get_platform_inst(platform_id)
+        except Exception:  # noqa: BLE001 - 非 OneBot 平台没有该接口
+            return None
+        if platform is None:
+            return None
+        getter = getattr(platform, "get_client", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:  # noqa: BLE001
+                return None
+        return getattr(platform, "bot", None)
+
+    async def send_reaction(self, umo: str, message_id: str, emoji_id: str) -> bool:
+        """给指定消息加 QQ 表情回应（OneBot `set_msg_emoji_like`）。"""
+        if not umo or not message_id or not emoji_id:
+            return False
+        client = self._client_for_umo(umo)
+        if client is None or not hasattr(client, "call_action"):
+            return False
+        try:
+            result = await asyncio.wait_for(
+                client.call_action(
+                    "set_msg_emoji_like",
+                    message_id=str(message_id),
+                    emoji_id=str(emoji_id),
+                    set=True,
+                ),
+                timeout=TRANSPORT_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - 动作失败由账本记录
+            if _is_unknown_delivery_error(error):
+                raise DeliveryUnknown(f"transport-timeout: {error}") from error
+            astrbot_logger.debug(f"{PLUGIN_NAME}: 消息回应失败: {error}")
+            return False
+        if isinstance(result, dict) and result.get("retcode") not in (None, 0):
+            astrbot_logger.debug(f"{PLUGIN_NAME}: 消息回应被平台拒绝: {result}")
+            return False
+        return True
+
+    async def _send_chain(self, umo: str, chain: MessageChain) -> bool:
+        """统一的平台发送：30 秒回执上限 + unknown 语义。"""
+        try:
             return bool(await asyncio.wait_for(
                 self._plugin.context.send_message(umo, chain),
                 timeout=TRANSPORT_TIMEOUT_SECONDS,
@@ -123,6 +408,13 @@ class PluginTransport:
             astrbot_logger.warning(f"{PLUGIN_NAME}: 发送消息失败: {error}")
             return False
 
+    def _vision_max_dimension(self) -> int:
+        try:
+            vision = (self._plugin._config_section("model") or {}).get("vision") or {}
+            return int(vision.get("maxImageDimension") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
     async def fetch_image_data_uri(self, source: str) -> Optional[Tuple[str, str]]:
         """把图片引用（URL / 本地路径 / base64）转换为 data URI。
 
@@ -134,7 +426,8 @@ class PluginTransport:
             if source.startswith("data:"):
                 header, _, payload = source.partition(",")
                 mime = header[5:].split(";")[0] or "image/jpeg"
-                return f"data:{mime};base64,{payload}", mime
+                data, mime = _resize_image_bytes(base64.b64decode(payload), mime, self._vision_max_dimension())
+                return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", mime
             if source.startswith("http://") or source.startswith("https://"):
                 import httpx
 
@@ -143,15 +436,15 @@ class PluginTransport:
                 if response.status_code >= 400 or not response.content:
                     return None
                 mime = response.headers.get("content-type", "image/jpeg").split(";")[0]
-                payload = base64.b64encode(response.content).decode("ascii")
-                return f"data:{mime};base64,{payload}", mime
+                data, mime = _resize_image_bytes(response.content, mime, self._vision_max_dimension())
+                return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", mime
             if source.startswith("file://"):
                 source = source[len("file://"):]
             if os.path.isfile(source):
                 mime = mimetypes.guess_type(source)[0] or "image/jpeg"
                 with open(source, "rb") as handle:
-                    payload = base64.b64encode(handle.read()).decode("ascii")
-                return f"data:{mime};base64,{payload}", mime
+                    data, mime = _resize_image_bytes(handle.read(), mime, self._vision_max_dimension())
+                return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", mime
         except Exception as error:  # noqa: BLE001
             astrbot_logger.debug(f"{PLUGIN_NAME}: 图片读取失败 {source}: {error}")
         return None
@@ -169,15 +462,25 @@ class PluginTransport:
                 if response.status_code >= 400 or not response.content:
                     return None
                 mime = response.headers.get("content-type", "audio/mpeg").split(";")[0]
+                data = response.content
+                if _is_silk(data):
+                    wav = _decode_silk_to_wav(data)
+                    if wav:
+                        return base64.b64encode(wav).decode("ascii"), "wav"
                 fmt = {"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg"}.get(mime, "mp3")
-                return base64.b64encode(response.content).decode("ascii"), fmt
+                return base64.b64encode(data).decode("ascii"), fmt
             if source.startswith("file://"):
                 source = source[len("file://"):]
             if os.path.isfile(source):
                 extension = os.path.splitext(source)[1].lower().lstrip(".") or "mp3"
-                fmt = extension if extension in ("mp3", "wav", "ogg", "m4a", "flac", "amr") else "mp3"
                 with open(source, "rb") as handle:
-                    return base64.b64encode(handle.read()).decode("ascii"), fmt
+                    data = handle.read()
+                if _is_silk(data, extension):
+                    wav = _decode_silk_to_wav(data)
+                    if wav:
+                        return base64.b64encode(wav).decode("ascii"), "wav"
+                fmt = extension if extension in ("mp3", "wav", "ogg", "m4a", "flac", "amr") else "mp3"
+                return base64.b64encode(data).decode("ascii"), fmt
         except Exception as error:  # noqa: BLE001
             astrbot_logger.debug(f"{PLUGIN_NAME}: 语音读取失败 {source}: {error}")
         return None
@@ -210,10 +513,12 @@ class HDSInterludePlugin(Star):
         self._background_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._started_at = time.time()
+        self._type0_task: Optional[asyncio.Task] = None
         if not self._blind:
             astrbot_logger.info(f"{PLUGIN_NAME}: 插件加载完成 {PLUGIN_VERSION}")
         self._register_commands()
         self._background_task = asyncio.get_event_loop().create_task(self._background())
+        self._type0_task = asyncio.get_event_loop().create_task(self._auto_import_type0())
         if self._blind:
             self._heartbeat_task = asyncio.get_event_loop().create_task(self._blind_heartbeat())
 
@@ -246,9 +551,17 @@ class HDSInterludePlugin(Star):
         return self._blind or bool((self._config_section("blindMode") or {}).get("enabled"))
 
     def _log(self, level: str, message: str) -> None:
-        """日志出口：任何情况下都不得抛出（对应上游 rc55 的日志层防御）。"""
+        """日志出口：任何情况下都不得抛出（对应上游 rc55 的日志层防御）。
+
+        `logging.level` 在这里生效：低于阈值的事件不会进入 AstrBot 日志。
+        内容预览由 `logging.logScriptPreview/logMessageContent` 在服务层控制。
+        """
         try:
             if self._blind_now() and level not in ("error",):
+                return
+            threshold = str(self._config_section("logging").get("level") or "info").lower()
+            order = {"debug": 10, "info": 20, "warn": 30, "warning": 30, "error": 40}
+            if order.get(level, 20) < order.get(threshold, 20):
                 return
             line = f"{PLUGIN_NAME}: {message}"
             if level == "error":
@@ -270,6 +583,29 @@ class HDSInterludePlugin(Star):
         except Exception as error:  # noqa: BLE001
             self._log("warn", f"后台循环退出：{error}")
 
+    async def _auto_import_type0(self) -> None:
+        """Type0 内置导入：插件加载时直连分享站拉取并应用。
+
+        不再依赖 typ-0 桌面端或任何外部平台：只读 `presetSync` 配置，
+        通过 HTTP 直接访问 `baseUrl`，按 revision 去重后写入本地配置。
+        """
+        sync = self._config_section("presetSync")
+        if not sync.get("enabled") or not sync.get("autoUpdate"):
+            return
+        code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
+        if not code:
+            self._log("warn", "Type0 自动导入已开启，但分享码/链接为空")
+            return
+        try:
+            # 给宿主留出加载余量，避免与其它插件的启动请求抢占。
+            await asyncio.sleep(2)
+            applied, reason = await self._run_preset_sync(None, None, force=False)
+            self._log("info" if applied else "debug", f"Type0 自动导入：{reason}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - 导入失败不能拖垮插件
+            self._log("warn", f"Type0 自动导入失败：{error}")
+
     async def _blind_heartbeat(self) -> None:
         """失明模式健康心跳（不包含故事与账户内容）。"""
         interval = max(1, int(self._config_section("blindMode").get("healthReportMinutes") or 10)) * 60
@@ -280,7 +616,7 @@ class HDSInterludePlugin(Star):
 
     async def terminate(self):
         """插件卸载/停用时收尾（对应上游 dispose 钩子）。"""
-        for task in (self._background_task, self._heartbeat_task):
+        for task in (self._background_task, self._heartbeat_task, self._type0_task):
             if task:
                 task.cancel()
         try:
@@ -299,13 +635,31 @@ class HDSInterludePlugin(Star):
             return "onebot"
         return raw or "unknown"
 
-    def _session(self, event: AstrMessageEvent) -> SessionView:
+    def _platform_client(self, event: AstrMessageEvent) -> Any:
+        """取当前事件所对应平台适配器的 OneBot 客户端（不可用时返回 None）。"""
+        try:
+            platform_id = event.get_platform_id()
+            platform = self.context.get_platform_inst(platform_id)
+        except Exception:  # noqa: BLE001 - 旧版/非 OneBot 适配器没有该接口
+            return None
+        if platform is None:
+            return None
+        getter = getattr(platform, "get_client", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:  # noqa: BLE001
+                return None
+        return getattr(platform, "bot", None)
+
+    async def _session(self, event: AstrMessageEvent) -> SessionView:
         images: List[str] = []
         audios: List[str] = []
         at_bot = False
         quote: Optional[Dict[str, str]] = None
         self_id = _text(event.get_self_id())
-        for component in event.get_messages():
+        messages = list(event.get_messages())
+        for component in messages:
             if isinstance(component, Image):
                 source = getattr(component, "url", None) or getattr(component, "file", None) or getattr(component, "path", None)
                 if source:
@@ -323,13 +677,25 @@ class HDSInterludePlugin(Star):
                 content = _text(getattr(component, "message_str", "") or getattr(component, "text", ""))
                 if content:
                     quote = {"senderId": sender, "senderName": sender, "content": content[:2000]}
+        content = _text(event.message_str)
+        forward_text = await _extract_forward_text(
+            messages,
+            self._config_section("runtime").get("forwardMessage") or {},
+            platform_client=self._platform_client(event),
+        )
+        if forward_text:
+            content = (
+                f"{content}\n[合并转发]\n{forward_text}".strip()
+                if content.strip()
+                else f"[合并转发]\n{forward_text}"
+            )
         return SessionView(
             platform=self._platform_name(event),
             selfId=self_id,
             userId=_text(event.get_sender_id()),
             channelId=_text(getattr(event, "unified_msg_origin", "")),
             isDirect=bool(event.is_private_chat()),
-            content=_text(event.message_str),
+            content=content,
             senderName=_text(event.get_sender_name()),
             groupId=_text(event.get_group_id()),
             messageId=_text(getattr(event.message_obj, "message_id", "")),
@@ -397,7 +763,7 @@ class HDSInterludePlugin(Star):
         if not capture:
             return
         try:
-            consumed = await self.service.receive(self._session(event))
+            consumed = await self.service.receive(await self._session(event))
         except Exception as error:  # noqa: BLE001 - 私聊归属不能因异常漏给其它 Agent
             self._log("error", f"私聊事件处理失败，已吞掉事件：{error}")
             event.stop_event()
@@ -420,7 +786,7 @@ class HDSInterludePlugin(Star):
                 yield event.plain_result(result)
                 return
         try:
-            consumed = await self.service.receive_group(self._session(event))
+            consumed = await self.service.receive_group(await self._session(event))
         except Exception as error:  # noqa: BLE001
             self._log("warn", f"群聊事件处理失败：{error}")
             return
@@ -513,7 +879,7 @@ class HDSInterludePlugin(Star):
             if text == name or text.startswith(name + " "):
                 args = text[len(name):].strip()
                 handler = self._commands[name]
-                session = self._session(event)
+                session = await self._session(event)
                 try:
                     return await handler(event, session, args)
                 except Exception as error:  # noqa: BLE001 - 命令异常回显而不崩溃
@@ -1428,19 +1794,20 @@ class HDSInterludePlugin(Star):
         if not self._require_manager(session):
             return NO_MANAGER
         sync = self._config_section("presetSync")
-        if not sync.get("enabled") or not str(sync.get("shareCode") or "").strip():
+        code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
+        if not sync.get("enabled") or not code:
             return "\n".join([
-                "预设同步未启用。",
-                "请在「插件配置 → 【扩展 18】预设同步」中配置:",
+                "Type0 预设导入未启用。",
+                "请在「插件配置 → 【预设入口】Type0 预设」中配置:",
                 "  1. 启用预设同步",
-                "  2. 填写分享码(8 位,在分享站详情页获取)",
-                f"  3.{' 自动更新已开启(重载时检查)' if sync.get('autoUpdate') else ' 自动更新未开启(仅手动触发)'}",
+                "  2. 填写分享码或完整分享链接",
+                f"  3.{' 加载时自动导入已开启' if sync.get('autoUpdate') else ' 加载时自动导入未开启（仅手动触发）'}",
                 "",
-                "填好后保存并重载,再执行 interlude.preset.sync 手动触发一次同步。",
+                "填好后保存并重载，插件会直连分享站自动拉取；也可执行 interlude.preset.sync 手动触发。",
             ])
         status_lines = [
-            f"同步配置:{sync.get('baseUrl') or default_share_base()} · 分享码 {sync.get('shareCode')}",
-            f"自动更新:{'开启(重载时检查)' if sync.get('autoUpdate') else '关闭(仅手动)'}",
+            f"同步配置:{sync.get('baseUrl') or default_share_base()} · 分享码 {code}",
+            f"加载时自动导入:{'开启' if sync.get('autoUpdate') else '关闭(仅手动)'}",
             f"应用分区:{('、'.join(sync.get('sections') or [])) if sync.get('sections') else '预设里有什么就同步什么'}",
             f"应用到当前故事:{'是' if sync.get('applyToCurrentStory') else '否'}",
         ]
@@ -1449,10 +1816,16 @@ class HDSInterludePlugin(Star):
         applied, reason = await self._run_preset_sync(event, session, force=True)
         return "\n".join([*status_lines, "", f"同步结果:{'✅ 已应用' if applied else '⏭ 跳过'} — {reason}"])
 
-    async def _run_preset_sync(self, event: AstrMessageEvent, session: SessionView, force: bool = False) -> Tuple[bool, str]:
-        """自动/手动同步共用路径（对应 runAutoSync）。"""
+    async def _run_preset_sync(
+        self, event: Optional[AstrMessageEvent], session: Optional[SessionView], force: bool = False
+    ) -> Tuple[bool, str]:
+        """自动/手动同步共用路径（对应 runAutoSync）。
+
+        `session=None` 表示插件加载时的内置导入：此时不依赖任何消息事件，
+        故事级应用回落到 canonical story。
+        """
         sync = self._config_section("presetSync")
-        code = str(sync.get("shareCode") or "").strip()
+        code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
         base_url = str(sync.get("baseUrl") or "").strip() or default_share_base()
         if not sync.get("enabled") or not code:
             return False, "同步未启用或未填写分享码"
@@ -1471,7 +1844,11 @@ class HDSInterludePlugin(Star):
         if patch:
             self._apply_config_patch(patch)
         if sync.get("applyToCurrentStory") and isinstance((info["payload"] or {}).get("storyDefaults"), dict):
-            story = await self.service.find_story(session)
+            story = (
+                await self.service.find_story(session)
+                if session is not None
+                else await self.service.get_canonical_story()
+            )
             if story is not None:
                 await self.service.update_setting(story, info["payload"]["storyDefaults"])
         self.service.save_preset_sync_snapshot({

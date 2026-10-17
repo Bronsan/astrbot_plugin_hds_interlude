@@ -479,6 +479,8 @@ class NarrativeRequest:
     workingDetails: List[Dict[str, Any]] = field(default_factory=list)
     scenePresence: List[Dict[str, Any]] = field(default_factory=list)
     deliveryReality: List[Dict[str, Any]] = field(default_factory=list)
+    mediaCatalog: List[Dict[str, Any]] = field(default_factory=list)
+    webContext: List[Dict[str, Any]] = field(default_factory=list)
     continuation: Optional[Dict[str, Any]] = None
     refreshContinuity: bool = False
     outputRecovery: bool = False

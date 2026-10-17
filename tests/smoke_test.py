@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -27,6 +28,7 @@ from core import agency as agency_mod  # noqa: E402
 from core import group_willingness as gw  # noqa: E402
 from core import schedule_preplan as preplan  # noqa: E402
 from core import script_engine as se  # noqa: E402
+from core import urge as urge_mod  # noqa: E402
 from core.narrator import (  # noqa: E402
     DEFAULT_STYLE_PROMPT,
     NarrativeResult,
@@ -40,10 +42,12 @@ from core.timeutil import format_story_clock, story_local_time_context  # noqa: 
 from core.turn_engine import TurnEngine, should_supersede_request  # noqa: E402
 from core.types import (  # noqa: E402
     DeliveryUnknown,
+    NarrativeImage,
     NarrativeRequest,
     Story,
     empty_story_setting,
     empty_story_state,
+    json_loads,
     now_utc,
     to_iso,
 )
@@ -247,9 +251,24 @@ async def test_turn_engine() -> None:
 class StubTransport:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.faces: list[tuple[str, str]] = []
+        self.media: list[tuple[str, str, str]] = []
+        self.reactions: list[tuple[str, str, str]] = []
 
-    async def send(self, umo: str, text: str) -> bool:
-        self.sent.append((umo, text))
+    async def send(self, umo: str, text: str, reply_to: str = "") -> bool:
+        self.sent.append((umo, text, reply_to))
+        return True
+
+    async def send_face(self, umo: str, face_id: str) -> bool:
+        self.faces.append((umo, face_id))
+        return True
+
+    async def send_media(self, umo: str, path: str, kind: str = "image") -> bool:
+        self.media.append((umo, path, kind))
+        return True
+
+    async def send_reaction(self, umo: str, message_id: str, emoji_id: str) -> bool:
+        self.reactions.append((umo, message_id, emoji_id))
         return True
 
 
@@ -465,7 +484,7 @@ async def test_rc57_alignment() -> None:
 class UnknownTransport:
     """模拟回执超时：请求已写出但结果不可知。"""
 
-    async def send(self, umo: str, text: str) -> bool:
+    async def send(self, umo: str, text: str, reply_to: str = "") -> bool:
         raise DeliveryUnknown("transport-timeout: 回执超时")
 
 
@@ -573,7 +592,7 @@ async def test_service_end_to_end() -> None:
         check("私聊接收消费", consumed is True, str(consumed))
         await asyncio.sleep(1.2)  # 等合并计时器 + 写作回合 + 分段投递完成
         check("模型被调用", calls["count"] >= 1, str(calls))
-        sent = [text for _, text in transport.sent]
+        sent = [item[1] for item in transport.sent]
         check("回复已投递（分段）", sent[:2] == ["在的", "怎么了"], str(sent))
         entries = await service.recent_entries(story.id, 10)
         kinds = [entry.kind for entry in entries]
@@ -612,6 +631,416 @@ async def test_service_end_to_end() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_urge_alignment() -> None:
+    """Urge 算法：区间接线、上膛/确认/爆发、引用校验。"""
+    cfg = urge_mod.resolve_urge_config({"enabled": True, "frequency": "medium"})
+    check("urge 预设 medium", cfg["idle"] == [35, 55] and cfg["burst"] == [3, 7], str(cfg))
+    custom = urge_mod.resolve_urge_config({"frequency": "custom", "advanced": {"idleMin": 100, "idleMax": 50}})
+    check("urge 区间下限不超过上限", custom["idle"] == [100, 100], str(custom["idle"]))
+    now = 1_000_000.0
+    state = urge_mod.normalize_urge_state(
+        {"version": 1, "buckets": [now - 60],
+         "armed": {"participantId": "p1", "entryId": 3, "at": now - 60}}, now
+    )
+    check("urge 状态恢复上膛", state["armed"] is not None, str(state))
+    reset = urge_mod.urge_user_event(state, now)
+    check("用户消息清空上膛", reset["armed"] is None and reset["buckets"][-1] >= now - 120, str(reset))
+    ignored = urge_mod.commit_urge(
+        state, {"value": 0.9, "basisQuote": "不存在的句子"}, "正文", 5, "p1", now, cfg, random_fn=lambda: 0.5
+    )
+    check("urge 引用不命中不采纳", ignored.get("armed") is None and ignored.get("value") is None, str(ignored))
+    committed = urge_mod.commit_urge(
+        state, {"value": 0.9, "basisQuote": "看了一眼手机", "pace": "normal"},
+        "她看了一眼手机。", 5, "p1", now, cfg, random_fn=lambda: 0.5
+    )
+    check("urge 高值上膛", (committed.get("armed") or {}).get("participantId") == "p1", str(committed))
+    acked = urge_mod.acknowledge_urge(committed, "p1", 5, now + 10)
+    check("urge 确认后进入 burst", (acked.get("burst") or {}).get("used") == 0, str(acked))
+    plan = urge_mod.plan_urge(
+        acked, now + 10, cfg, 0, False, random_fn=lambda: 0.5,
+        rhythm={"attention": "phone-focused", "stale": False},
+    )
+    check("urge burst 计划", plan["reason"] == "confirmed-contact-burst" and plan["minutes"] <= cfg["ttl"], str(plan))
+    slow = urge_mod.plan_urge({**state, "pace": "slow", "suggested": 120}, now, cfg, 0, False, random_fn=lambda: 0.5)
+    check("urge slow 尊重建议间隔", slow["reason"] == "script-slow" and slow["minutes"] >= cfg["slow"][0], str(slow))
+
+
+def test_type0_share_codes() -> None:
+    """Type0 分享码/链接解析（内置导入入口）。"""
+    from core.share_sync import extract_share_code
+
+    check("裸分享码", extract_share_code(" abcd-1234 ") == "ABCD-1234", "")
+    check(
+        "typ0 链接",
+        extract_share_code("https://typ0.space/p/ABCD-1234") == "ABCD-1234",
+        "",
+    )
+    check(
+        "查询参数链接",
+        extract_share_code("https://typ0.space/?code=WXYZ-99") == "WXYZ-99",
+        "",
+    )
+    check("无效链接", extract_share_code("https://typ0.space/about") == "", "")
+
+
+def test_browser_helpers() -> None:
+    """网页观察的纯解析逻辑（正文提取 / 搜索结果解析 / 提示词）。"""
+    from core.narrator import browser_instruction
+    from core.service import first_search_result, parse_html_page
+
+    page = parse_html_page(
+        "<html><head><title>示例标题</title><script>bad()</script></head>"
+        "<body><p>第一段</p><p>第二段</p></body></html>"
+    )
+    check("网页标题提取", page["title"] == "示例标题", page["title"])
+    check("网页正文提取", "第一段" in page["text"] and "第二段" in page["text"], page["text"])
+    check("网页脚本剔除", "bad()" not in page["text"], page["text"])
+    link = first_search_result(
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">x</a>',
+        "https://html.duckduckgo.com/html/?q=x",
+    )
+    check("搜索结果解包", link == "https://example.com/a", link)
+    check("网页观察提示词", "WEB OBSERVATION" in browser_instruction(True), "")
+    check("群回合不注入网页意图", browser_instruction(True, True) == "", "")
+
+
+def test_schema_defaults() -> None:
+    """schema 与代码默认值单一来源（防止 rc54 的双源漂移复发）。"""
+    with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"), encoding="utf-8") as handle:
+        schema = json.load(handle)
+    runtime = schema["runtime"]["items"]
+    check("schema 默认文风与常量一致", schema["model"]["items"]["stylePrompt"]["default"] == DEFAULT_STYLE_PROMPT, "")
+    check("schema contextEntryLimit=17", runtime["contextEntryLimit"]["default"] == 17, str(runtime["contextEntryLimit"]["default"]))
+    check("schema contextTimeWindowMinutes=6", runtime["contextTimeWindowMinutes"]["default"] == 6, "")
+    check("schema maxScriptCharacters=1400", runtime["maxScriptCharacters"]["default"] == 1400, "")
+    check("schema maxMessageCharacters=1500", runtime["maxMessageCharacters"]["default"] == 1500, "")
+    check("schema urge advanced 齐全", len(schema["urge"]["items"]["advanced"]["items"]) == 17, "")
+    check("schema 预设置顶", next(iter(schema)) == "presetSync", str(next(iter(schema))))
+
+
+async def test_wiring_fixes() -> None:
+    """本轮修复：提示词覆盖、群缓冲隔离、端点路由、动作投递、时间导演、扫描上限。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = build_config()
+        config["mainPromptOverride"] = "覆盖提示词：保持克制，不写戏剧化转折。"
+        config["urge"] = {"enabled": False}
+        config["timelineDirector"] = {"enabled": True}
+        config["chatActions"] = {
+            "enabled": True, "nativeFaces": True, "messageReactions": True,
+            "allowedNativeFaces": ["smile", "laugh", "sweat", "awkward"],
+        }
+        config["stickers"] = {"enabled": True, "directory": "stickers", "maxFileSizeMB": 1, "catalogLimit": 10}
+        config["logging"] = {"level": "debug", "logScriptPreview": False, "logMessageContent": False, "previewLength": 80}
+        config["browser"] = {
+            "enabled": True, "mode": "deferred-only", "allowSearch": True, "allowVisit": True,
+            "searchUrlTemplate": "https://html.duckduckgo.com/html/?q={query}",
+            "allowedDomains": [], "blockedDomains": [],
+            "maxTextCharacters": 4000, "maxExcerptCharacters": 1000, "cacheMinutes": 30,
+        }
+        config["onebot"]["groupChats"] = [
+            {"groupId": "g1", "label": "一群", "enabled": True, "responseMode": "always",
+             "debounceSeconds": 0.02, "willingnessPreset": "off", "contextLimit": 10},
+            {"groupId": "g2", "label": "二群", "enabled": True, "responseMode": "always",
+             "debounceSeconds": 0.02, "willingnessPreset": "off", "contextLimit": 10},
+        ]
+        os.makedirs(os.path.join(tmp, "stickers", "happy"), exist_ok=True)
+        with open(os.path.join(tmp, "stickers", "happy", "smile.png"), "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+        transport = StubTransport()
+        service = InterludeService(
+            config_getter=lambda: config, data_dir=tmp, logger=lambda level, message: None, transport=transport
+        )
+        session = SessionView(
+            platform="onebot", selfId="90001", userId="10001", channelId="umo1",
+            isDirect=True, content="在吗", senderName="小林", umo="umo1", messageId="m-100",
+        )
+        story = await service.create_story(session)
+        participant = await service.find_participant(session, story)
+
+        # 1) mainPromptOverride：进入系统提示词且优先于 model.mainPrompt
+        captured: dict = {}
+
+        async def fake_call(kind, messages, *args, **kwargs):
+            captured["system"] = messages[0]["content"]
+            return json.dumps(
+                {"script": "她抬头看了一会儿窗外。", "interaction": {"seen": True, "reply": {"mode": "none"}}},
+                ensure_ascii=False,
+            ), None, "stub"
+
+        service.narrator._call_with_failover = fake_call
+        now = now_utc()
+        request = await service._build_request(story, participant, "user-message", now, now)
+        result = await service.narrator.decide(request, config)
+        check("mainPromptOverride 进入提示词", "覆盖提示词" in captured.get("system", ""), captured.get("system", "")[-200:])
+        check("覆盖后仍可解析决策", result.succeeded, str(result.error))
+
+        # native 视觉：图片作为 image_url 部分进入主模型（而不是只报 imageCount）
+        vision_capture: dict = {}
+
+        async def fake_vision_call(kind, messages, *args, **kwargs):
+            vision_capture["messages"] = messages
+            return json.dumps(
+                {"script": "她看了一眼照片。", "interaction": {"seen": True, "reply": {"mode": "none"}}},
+                ensure_ascii=False,
+            ), None, "stub"
+
+        service.narrator._call_with_failover = fake_vision_call
+        vision_config = json.loads(json.dumps(config))
+        vision_config["model"]["vision"] = {
+            "enabled": True, "mode": "native", "detail": "low", "maxImageDimension": 40,
+        }
+        vision_request = await service._build_request(story, participant, "user-message", now, now)
+        vision_request.images = [
+            NarrativeImage(id="i1", mimeType="image/png", dataUri="data:image/png;base64,AAAA")
+        ]
+        await service.narrator.decide(vision_request, vision_config)
+        vision_content = vision_capture["messages"][1]["content"]
+        check(
+            "native 视觉送入主模型",
+            isinstance(vision_content, list)
+            and any(
+                part.get("type") == "image_url" and part.get("image_url", {}).get("detail") == "low"
+                for part in vision_content
+            ),
+            str(vision_content)[:240],
+        )
+
+        # 2) 群缓冲按 (故事, 群) 隔离；群消息 unknown → pending（rc56 typ-0 等价语义）
+        seen_groups: list[str] = []
+
+        class GroupUnknownTransport(StubTransport):
+            async def send(self, umo: str, text: str, reply_to: str = "") -> bool:
+                if umo.startswith("gumo"):
+                    raise DeliveryUnknown("transport-timeout: 回执超时")
+                return await super().send(umo, text, reply_to)
+
+        group_transport = GroupUnknownTransport()
+        service._transport = group_transport
+
+        async def fake_group_run(story_obj, request_obj, group_turn=False):
+            seen_groups.append(request_obj.groupContext["groupId"])
+            messages = request_obj.groupContext.get("messages") or []
+            reaction = []
+            if messages and messages[-1].get("messageId"):
+                reaction = [{"messageRef": messages[-1]["messageRef"], "reaction": "like"}]
+            return {
+                "success": True,
+                "decision": {
+                    "script": "她看了一眼群聊。",
+                    "groupReply": "我在。",
+                    "messageReactions": reaction,
+                },
+                "error": "",
+            }
+
+        service._run_narrative = fake_group_run
+        for group_id, umo in (("g1", "gumo1"), ("g2", "gumo2")):
+            await service.receive_group(SessionView(
+                platform="onebot", selfId="90001", userId="10001", channelId=umo,
+                isDirect=False, content="群里说话", senderName="小林", umo=umo,
+                groupId=group_id, atBot=True, messageId=f"gmsg-{group_id}",
+            ))
+        await asyncio.sleep(0.8)
+        check("群缓冲按群隔离", sorted(seen_groups) == ["g1", "g2"], str(seen_groups))
+        group_row = service.db.first_row(
+            "interlude_script_entry", {"kind": "character-group-message"}, order_by="id DESC"
+        )
+        group_meta = json_loads(group_row.get("metadata"), {}) if group_row else {}
+        check("群消息 unknown 记 pending", group_meta.get("deliveryStatus") == "pending", str(group_meta))
+        group_script_row = service.db.first_row(
+            "interlude_script_entry", {"kind": "script"}, order_by="id DESC"
+        )
+        group_script_meta = json_loads(group_script_row.get("metadata"), {}) if group_script_row else {}
+        group_actions = group_script_meta.get("deliveryActions") or []
+        group_segments = [segment for action in group_actions for segment in action.get("segments", [])]
+        check(
+            "群回应投递 delivered",
+            bool(group_transport.reactions)
+            and any(segment.get("kind") == "message-reaction" and segment.get("status") == "delivered" for segment in group_segments),
+            str(group_segments),
+        )
+        check(
+            "群消息 pending 带原因",
+            str(group_meta.get("deliveryReason") or "").startswith("transport-timeout"),
+            str(group_meta),
+        )
+        service._transport = transport
+
+        async def fake_private_run(story_obj, request_obj, group_turn=False):
+            return {
+                "success": True,
+                "decision": {
+                    "script": "她回了消息。",
+                    "interaction": {"seen": True, "reply": {"mode": "immediate", "content": "在的"}},
+                },
+                "error": "",
+            }
+
+        service._run_narrative = fake_private_run
+
+        # 3) 端点登记与切换
+        await service.receive(session)
+        await asyncio.sleep(0.6)
+        fresh = await service.get_participant(participant.id)
+        check("端点登记首条会话", service._delivery_umo(fresh) == "umo1", service._delivery_umo(fresh))
+        check(
+            "replyTo 透传到投递层",
+            any(item[2] == "m-100" for item in transport.sent),
+            str(transport.sent[-3:]),
+        )
+        session_two = SessionView(
+            platform="onebot", selfId="90001", userId="10001", channelId="umo2",
+            isDirect=True, content="还在吗", senderName="小林", umo="umo2",
+        )
+        await service.receive(session_two)
+        await asyncio.sleep(0.6)
+        fresh = await service.get_participant(participant.id)
+        check("端点切换到最近会话", service._delivery_umo(fresh) == "umo2", service._delivery_umo(fresh))
+        check("同一用户只保留一个端点", len(service.list_participant_endpoints(participant.id)) == 1, str(service.list_participant_endpoints(participant.id)))
+
+        # 4) 平台动作投递：原生表情 / 表情包 / 回应
+        decision = {
+            "script": "她把手机翻过来，笑了一下。",
+            "interaction": {"seen": True, "reply": {"mode": "none"}},
+            "localMedia": {"assetId": "happy/smile", "intent": "发个笑脸"},
+            "nativeFace": {"semantic": "smile", "intent": "轻轻笑"},
+            "messageReactions": [{"messageRef": "m1", "reaction": "like"}],
+        }
+        stamp = now_utc()
+        persisted = await service._persist_turn(story.id, participant.id, decision, stamp, stamp, "user-message")
+        check("平台动作单独成账", len(persisted["platformActions"]) == 1, str(persisted["platformActions"]))
+        await service._deliver_platform_actions(story, participant, persisted["platformActions"], stamp)
+        row = service.db.first_row("interlude_script_entry", {"id": persisted["scriptEntryId"]})
+        segments = [
+            segment
+            for action in (json_loads(row["metadata"], {}).get("deliveryActions") or [])
+            for segment in action.get("segments", [])
+        ]
+        statuses = {segment["kind"]: segment["status"] for segment in segments}
+        check("原生表情投递 delivered", bool(transport.faces) and statuses.get("native-face") == "delivered", str(statuses))
+        check("本地表情包投递 delivered", bool(transport.media) and statuses.get("local-media") == "delivered", str(statuses))
+        check("私聊不生成消息回应", "message-reaction" not in statuses, str(statuses))
+        check("素材目录进入提示词", any(item["assetId"] == "happy/smile" for item in service._media_catalog()), str(service._media_catalog()))
+        # 符号链接越界：目录内链接指向 root 外时必须跳过（rc56 realpath 加固）
+        outside = os.path.join(tmp, "outside.png")
+        with open(outside, "wb") as handle:
+            handle.write(b"outside")
+        link_path = os.path.join(tmp, "stickers", "happy", "evil.png")
+        try:
+            os.symlink(outside, link_path)
+            service._sticker_cache = (0, [])
+            check("越界符号链接不参与投递", service._resolve_sticker("happy/evil") is None, "")
+            check(
+                "越界符号链接不进入提示词目录",
+                all(item["assetId"] != "happy/evil" for item in service._media_catalog()),
+                str(service._media_catalog()),
+            )
+            os.unlink(link_path)
+        except (OSError, NotImplementedError):
+            pass
+        # 未登记语义 / 不存在素材 → cancelled（不再永久 pending）
+        bad = {
+            "script": "她想发点什么，又停住了。",
+            "interaction": {"seen": True, "reply": {"mode": "none"}},
+            "localMedia": {"assetId": "missing/asset", "intent": "发个表情"},
+            "nativeFace": {"semantic": "not-a-face", "intent": "做个表情"},
+        }
+        persisted_bad = await service._persist_turn(story.id, participant.id, bad, stamp, stamp, "user-message")
+        await service._deliver_platform_actions(story, participant, persisted_bad["platformActions"], stamp)
+        row_bad = service.db.first_row("interlude_script_entry", {"id": persisted_bad["scriptEntryId"]})
+        bad_segments = [
+            segment
+            for action in (json_loads(row_bad["metadata"], {}).get("deliveryActions") or [])
+            for segment in action.get("segments", [])
+        ]
+        check("非法动作全部 cancelled", bad_segments and all(segment["status"] == "cancelled" for segment in bad_segments), str(bad_segments))
+
+        # 4b) 网页观察：域名策略、执行与 webContext
+        check(
+            "网页观察拒绝私网",
+            not await service._browser_domain_allowed("http://127.0.0.1/", config["browser"]),
+            "",
+        )
+        check(
+            "网页观察拒绝黑名单",
+            not await service._browser_domain_allowed(
+                "https://example.com/", {"blockedDomains": ["example.com"]}
+            ),
+            "",
+        )
+
+        async def fake_observe(mode, query, url, cfg):
+            return {
+                "status": "ready", "url": "https://example.com/a",
+                "title": "示例页面", "excerpt": "页面正文内容", "summary": "页面正文内容",
+            }
+
+        service._browser_observe = fake_observe
+        await service._execute_browser_intents(
+            story,
+            {"browserIntents": [{"mode": "visit", "timing": "deferred", "url": "https://example.com/a"}]},
+            participant.id,
+            now_utc(),
+        )
+        observations = service._browser_observations(story.id)
+        check(
+            "网页观察落库并进入 webContext",
+            any(item.get("title") == "示例页面" for item in observations),
+            str(observations),
+        )
+        browser_request = await service._build_request(story, participant, "user-message", now, now)
+        check("webContext 进入请求", bool(browser_request.webContext), str(browser_request.webContext))
+
+        # 5) 时间导演接线
+        captured_plan: dict = {}
+
+        async def fake_plan(payload, cfg):
+            captured_plan["payload"] = payload
+            return {"beats": [{"at": 0.5, "kind": "activity", "summary": "整理花材"}], "carry": ["答应回电"]}
+
+        async def fake_advance_run(story_obj, request_obj, group_turn=False):
+            captured_plan["request"] = request_obj
+            return {"success": False, "decision": {}, "error": "stub"}
+
+        service.narrator.plan_timeline = fake_plan
+        service._run_narrative = fake_advance_run
+        await service._advance_unlocked(story.id, now_utc(), True)
+        planned = captured_plan.get("request")
+        check("时间账本进入请求", planned is not None and planned.timelinePlan is not None and bool(planned.timelinePlan.beats), str(planned and planned.timelinePlan))
+
+        # 6) 架空世界识别（weather.skipFantasyWorld）
+        fantasy = Story(
+            id="fantasy", platform="onebot", selfId="1", userId="2", channelId="c", status="active",
+            setting={**story.setting, "world": "异世界魔法学院，精灵与龙族共存。"},
+            state=empty_story_state(), cursorAt=now, createdAt=now, updatedAt=now,
+        )
+        check("架空世界命中", service._is_fantasy_world(fantasy), "")
+        check("现实世界不误判", not service._is_fantasy_world(story), "")
+
+        # 7) maxStoriesPerSweep：每轮只处理配置数量的故事
+        config["runtime"]["maxStoriesPerSweep"] = 1
+        scanned: list[str] = []
+
+        async def fake_due(story_obj, now_obj):
+            scanned.append(story_obj.id)
+            return 0
+
+        service._process_due_intents = fake_due
+        service.db.insert_row("interlude_story", {
+            "id": "story-extra", "platform": "onebot", "selfId": "90001", "userId": "10002",
+            "channelId": "umo-extra", "status": "active",
+            "setting": story.setting, "state": empty_story_state(),
+            "cursorAt": now, "createdAt": now, "updatedAt": now,
+        })
+        await service.sweep()
+        check("扫描上限生效", len(scanned) == 1, str(scanned))
+        service.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def main() -> None:
     test_timeutil()
     test_group_willingness()
@@ -619,11 +1048,16 @@ async def main() -> None:
     test_script_engine()
     test_schedule_preplan()
     test_agency()
+    test_urge_alignment()
+    test_type0_share_codes()
+    test_browser_helpers()
+    test_schema_defaults()
     await test_turn_engine()
     await test_rc56_alignment()
     await test_rc57_alignment()
     await test_delivery_unknown()
     await test_service_end_to_end()
+    await test_wiring_fixes()
     print(f"\n通过 {PASSED} 项")
     if FAILED:
         print(f"失败 {len(FAILED)} 项：")

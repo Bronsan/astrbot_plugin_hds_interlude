@@ -13,10 +13,16 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import os
 import random
 import re
+import socket
 import time
+from html import unescape
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -25,6 +31,7 @@ from . import agency as agency_mod
 from . import alter as alter_mod
 from . import group_willingness as willingness_mod
 from . import schedule_preplan as preplan_mod
+from . import urge as urge_mod
 from .database import Database
 from .narrator import (
     ModelCallError,
@@ -39,6 +46,7 @@ from .script_engine import (
     create_script_delivery_actions,
     decision_to_script_commit,
     delivery_reality_projection,
+    delivery_segments,
     live_narrative_intents,
     merge_participant_state,
     merge_setting,
@@ -74,6 +82,7 @@ from .types import (
     ScriptEntry,
     StatePatch,
     Story,
+    TimelinePlan,
     empty_participant_state,
     empty_story_setting,
     empty_story_state,
@@ -93,6 +102,91 @@ TRIGGER_PREFIX = re.compile(r"^[!/.]?interlude(?:\.|\s|$)", re.IGNORECASE)
 def _pick(value: Any, default: Any) -> Any:
     """None 才用默认值：保留 0 / False 等合法配置（避免 `or` 误伤）。"""
     return default if value is None else value
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """从公开网页提取标题与正文（跳过脚本/样式，保留段落分隔）。"""
+
+    _BLOCK_TAGS = {
+        "p", "div", "br", "li", "tr", "section", "article", "header", "footer",
+        "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self._parts: List[str] = []
+        self._skip = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in ("script", "style", "noscript", "svg"):
+            self._skip += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style", "noscript", "svg") and self._skip:
+            self._skip -= 1
+        elif tag == "title":
+            self._in_title = False
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip:
+            return
+        if self._in_title:
+            self.title += data
+        else:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return re.sub(r"\s+", " ", "".join(self._parts)).strip()
+
+
+def first_search_result(source: str, base_url: str) -> str:
+    """从搜索结果页取第一个外链（兼容 DuckDuckGo 的 uddg 重定向）。"""
+    for raw in re.findall(r'<a[^>]+href="([^"]+)"', source or "", flags=re.I):
+        target = unescape(raw)
+        if target.startswith("//"):
+            target = "https:" + target
+        elif target.startswith("/"):
+            target = urljoin(base_url, target)
+        if not target.startswith("http"):
+            continue
+        parsed = urlparse(target)
+        host = (parsed.hostname or "").lower()
+        if "duckduckgo.com" in host or "bing.com" in host or "google.com" in host:
+            uddg = parse_qs(parsed.query).get("uddg")
+            if uddg:
+                target = unquote(uddg[0])
+            else:
+                continue
+        return target
+    return ""
+
+
+def parse_html_page(source: str) -> Dict[str, str]:
+    """解析网页为 `{title, text}`（纯标准库，失败时退化为空）。"""
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(source or "")
+    except Exception:  # noqa: BLE001 - 异常 HTML 也要尽量给出正文
+        pass
+    return {"title": unescape(parser.title).strip(), "text": parser.text()}
+
+
+def _meta_text(metadata: Any, key: str) -> str:
+    """从条目 metadata（可能是 JSON 文本）里取一个字符串字段。"""
+    if isinstance(metadata, str):
+        metadata = json_loads(metadata, {})
+    if not isinstance(metadata, dict):
+        return ""
+    value = metadata.get(key)
+    return str(value) if value else ""
 
 
 @dataclass
@@ -217,7 +311,8 @@ class InterludeService:
         self.narrator = Narrator(model_config={}, on_log=lambda channel, message: self._log("info", message))
         self._story_locks: Dict[str, asyncio.Lock] = {}
         self._seen_incoming: Dict[str, float] = {}
-        self._buffered_group_turns: Dict[str, Dict[str, Any]] = {}
+        self._buffered_group_turns: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._group_flush_locks: Dict[str, asyncio.Lock] = {}
         self._runtime_generation = 0
         self._paused = False
         self._pending_retries: Dict[str, Dict[str, Any]] = {}
@@ -858,7 +953,7 @@ class InterludeService:
         content = sanitize_and_clamp_visible_content(
             session.content, int(self.runtime.get("maxMessageCharacters") or 1500) * 4, DEFAULT_MESSAGE_SEPARATOR
         )
-        # 图片 / 语音占位；转发展开由平台层预处理（见 forward 模块）。
+        # 图片 / 语音占位；合并转发已由入口层展开（main._extract_forward_text）。
         image_sources = list(session.imageSources)
         audio_sources = list(session.audioSources)
         entry_kind = "user-message"
@@ -899,6 +994,9 @@ class InterludeService:
         audio_sources: List[str],
     ) -> None:
         metadata: Dict[str, Any] = {}
+        if session.messageId:
+            # typ-0 replyTo 的等价物：保留触发消息 ID，供引用回复透传。
+            metadata["messageId"] = session.messageId
         if image_sources:
             metadata["imageSources"] = image_sources
         if audio_sources:
@@ -918,24 +1016,90 @@ class InterludeService:
             self.db.update_rows("interlude_participant", {"id": participant.id}, {
                 "channelId": session.umo, "updatedAt": now,
             })
+        endpoint_id = self._remember_participant_endpoint(participant, session, now)
+        if endpoint_id:
+            endpoint_state = dict(participant.state or {})
+            endpoint_state["preferredEndpointId"] = endpoint_id
+            self.db.update_rows("interlude_participant", {"id": participant.id}, {
+                "state": endpoint_state, "updatedAt": now,
+            })
         state = story.state
         automation = dict(state.get("automation") or {})
         automation["lastUserMessageAt"] = to_iso(now)
         automation["quietUntil"] = to_iso(now + timedelta(minutes=10))
+        # Urge：用户消息只改变"下一次推进"的密度信号，不直接触发回复。
+        urge_config = urge_mod.resolve_urge_config(self.config.get("urge"))
+        if urge_config["enabled"]:
+            urge_state = urge_mod.normalize_urge_state(state.get("urge"), now.timestamp())
+            state = {**state, "urge": urge_mod.urge_user_event(urge_state, now.timestamp())}
         self.db.update_rows("interlude_story", {"id": story.id}, {
             "state": encode_story_state({**state, "automation": automation}),
             "updatedAt": now,
         })
 
     async def _note_participant_incoming(self, story: Story, participant: Participant, now: datetime) -> None:
-        state = dict(participant.state or {})
+        # 重新读取行，避免用进场时的旧快照覆盖端点/未读等并发更新。
+        row = self.db.first_row("interlude_participant", {"id": participant.id})
+        state = dict(json_loads((row or {}).get("state"), {}) or {})
         state["unreadMessageCount"] = int(state.get("unreadMessageCount") or 0) + 1
         state["lastUserMessageAt"] = to_iso(now)
         changes: Dict[str, Any] = {"state": state, "updatedAt": now}
         # 参与者会话地址随事件刷新（主动投递与延迟消息依赖它找到会话）。
-        if participant.channelId:
+        if row and row.get("channelId"):
+            changes["channelId"] = row["channelId"]
+        elif participant.channelId:
             changes["channelId"] = participant.channelId
         self.db.update_rows("interlude_participant", {"id": participant.id}, changes)
+
+    def _remember_participant_endpoint(self, participant: Participant, session: SessionView, now: datetime) -> str:
+        """把本次入站会话登记为参与者的可用端点（对应 endpoint-state 的刷新）。
+
+        端点必须携带真实的 `umo`（平台会话地址）才能参与投递；没有 `umo`
+        的入站事件（例如某些适配器只给 user_id）不会覆盖已有端点。
+        """
+        if not session.umo or not session.userId:
+            return ""
+        platform = session.platform or "onebot"
+        endpoint_id = f"ep:{stable_suffix(f'{participant.id}|{platform}|{session.userId}', 12)}"
+        values = {
+            "ownerKind": "participant",
+            "ownerId": participant.id,
+            "channelKind": "qq",
+            "platform": platform,
+            "accountKey": f"{platform}:{session.selfId}",
+            "selfId": session.selfId,
+            "userId": session.userId,
+            "channelId": session.umo,
+            "conversationKind": "private",
+            "enabled": True,
+            "updatedAt": now,
+        }
+        existing = self.db.first_row("interlude_endpoint", {"id": endpoint_id})
+        if existing:
+            self.db.update_rows("interlude_endpoint", {"id": endpoint_id}, values)
+        else:
+            self.db.insert_row("interlude_endpoint", {"id": endpoint_id, **values, "createdAt": now})
+        return endpoint_id
+
+    def _delivery_umo(self, participant: Participant) -> str:
+        """选择投递地址：优先参与者端点，其次 `participant.channelId`。
+
+        端点路由让同一参与者在多个平台/账号之间切换时，消息从"最近一次
+        真实会话"对应的账号发出，而不是永远使用首次建档时的地址。
+        """
+        state = participant.state or {}
+        preferred = state.get("preferredEndpointId")
+        if isinstance(preferred, str) and preferred:
+            row = self.db.first_row("interlude_endpoint", {"id": preferred, "enabled": True})
+            if row and row.get("channelId"):
+                return str(row["channelId"])
+        rows = self.db.list_rows("interlude_endpoint", {
+            "ownerKind": "participant", "ownerId": participant.id, "enabled": True,
+        }, order_by="updatedAt DESC")
+        for row in rows:
+            if row.get("channelId"):
+                return str(row["channelId"])
+        return participant.channelId
 
     def _is_duplicate_incoming(self, key: str) -> bool:
         now = time.time()
@@ -988,7 +1152,12 @@ class InterludeService:
             "participantId": "",
             "content": f"[群{group.get('label') or session.groupId}] {session.senderName or session.userId}：{entry_content}",
             "occurredAt": to_iso(now),
-            "metadata": {"groupId": session.groupId, "senderId": session.userId, "senderName": session.senderName},
+            "metadata": {
+                "groupId": session.groupId,
+                "senderId": session.userId,
+                "senderName": session.senderName,
+                **({"messageId": session.messageId} if session.messageId else {}),
+            },
         }, now))
 
         response_mode = group.get("responseMode") or "mention-only"
@@ -1027,11 +1196,12 @@ class InterludeService:
                 f"({willingness_mod.format_willingness_gate_diagnosis(decision['diagnosis'])})",
             )
             return True
-        # 进入群回合缓冲（对应 bufferedGroupTurns 的简化）
-        turn = self._buffered_group_turns.get(story.id)
+        # 进入群回合缓冲：按 (故事, 群) 隔离，多群同时说话不会串批。
+        buffer_key = (story.id, session.groupId)
+        turn = self._buffered_group_turns.get(buffer_key)
         if turn is None:
             turn = {"messages": [], "timer": None, "groupId": session.groupId, "umo": session.umo, "mention": mentioned}
-            self._buffered_group_turns[story.id] = turn
+            self._buffered_group_turns[buffer_key] = turn
         turn["messages"].append({"content": entry_content, "senderName": session.senderName, "senderId": session.userId})
         turn["groupId"] = session.groupId
         turn["umo"] = session.umo or turn.get("umo") or ""
@@ -1040,18 +1210,46 @@ class InterludeService:
             turn["timer"].cancel()
         debounce = max(0.0, float(_pick(group.get("debounceSeconds"), 1)))
         loop = asyncio.get_event_loop()
-        turn["timer"] = loop.call_later(debounce, lambda: asyncio.ensure_future(self._flush_group_turn(story.id)))
+        turn["timer"] = loop.call_later(
+            debounce,
+            lambda sid=story.id, gid=session.groupId: asyncio.ensure_future(self._flush_group_turn(sid, gid)),
+        )
         return True
 
-    async def _flush_group_turn(self, story_id: str) -> None:
-        """群回合刷写：把合并后的群消息交给主叙事（对应 flushBufferedGroupTurn 的简化）。"""
-        turn = self._buffered_group_turns.pop(story_id, None)
+    async def _flush_group_turn(self, story_id: str, group_id: str) -> None:
+        """群回合刷写入口：同一故事同一时刻只允许一个群批次写作。
+
+        群批次之间互不阻塞（否则两个群会互相等待），但同一故事的落库与
+        游标推进必须串行，避免并发写作把时间线写乱。
+        """
+        buffer_key = (story_id, group_id)
+        turn = self._buffered_group_turns.pop(buffer_key, None)
         if not turn or not turn.get("messages"):
             return
-        if self.has_pending_narrative(story_id):
-            self._buffered_group_turns[story_id] = turn
+        lock = self._group_flush_locks.setdefault(story_id, asyncio.Lock())
+        if lock.locked():
+            self._buffered_group_turns[buffer_key] = turn
             loop = asyncio.get_event_loop()
-            turn["timer"] = loop.call_later(1.0, lambda: asyncio.ensure_future(self._flush_group_turn(story_id)))
+            turn["timer"] = loop.call_later(
+                0.5,
+                lambda sid=story_id, gid=group_id: asyncio.ensure_future(self._flush_group_turn(sid, gid)),
+            )
+            return
+        async with lock:
+            await self._flush_group_turn_locked(story_id, group_id, turn)
+
+    async def _flush_group_turn_locked(
+        self, story_id: str, group_id: str, turn: Dict[str, Any]
+    ) -> None:
+        """群回合刷写主体：把合并后的群消息交给主叙事（对应 flushBufferedGroupTurn）。"""
+        buffer_key = (story_id, group_id)
+        if self._private_narrative_pending(story_id):
+            self._buffered_group_turns[buffer_key] = turn
+            loop = asyncio.get_event_loop()
+            turn["timer"] = loop.call_later(
+                1.0,
+                lambda sid=story_id, gid=group_id: asyncio.ensure_future(self._flush_group_turn(sid, gid)),
+            )
             return
         story = await self.get_story(story_id)
         if story is None or not self.can_handle_story(story):
@@ -1070,6 +1268,10 @@ class InterludeService:
             "characterRole": group.get("characterRole") or "",
             "messages": [
                 {
+                    # messageRef 是给模型看的稳定引用；messageId 是平台真实消息 ID，
+                    # 用于引用回复与消息回应（对应上游 groupContext.messages）。
+                    "messageRef": f"msg-{entry.id}",
+                    "messageId": _meta_text(entry.metadata, "messageId"),
                     "senderId": (entry.metadata or {}).get("senderId") or "",
                     "senderName": (entry.metadata or {}).get("senderName") or "",
                     "content": entry.content,
@@ -1091,10 +1293,19 @@ class InterludeService:
                 reply = (decision.get("interaction") or {}).get("reply") or {}
                 if reply.get("mode") == "immediate" and isinstance(reply.get("content"), str) and reply["content"].strip():
                     decision["groupReply"] = reply["content"]
+            # 消息回应只允许指向本轮 groupContext 中真实存在的消息。
+            normalized_reactions = self._normalize_group_reactions(
+                decision.get("messageReactions"), group_context.get("messages") or []
+            )
+            if normalized_reactions:
+                decision["messageReactions"] = normalized_reactions
+            else:
+                decision.pop("messageReactions", None)
             # 群回合的正文同样落库（对应群的 script 条目；群发言另行登记）
+            group_entry_id = 0
             if decision.get("script"):
                 scene = await self.active_scene(story_id)
-                await self.serial(story_id, lambda: self.append_entry(story_id, {
+                group_entry_id = await self.serial(story_id, lambda: self.append_entry(story_id, {
                     "kind": "script",
                     "actor": "protagonist",
                     "participantId": "",
@@ -1111,10 +1322,16 @@ class InterludeService:
                 umo = turn.get("umo") or ""
                 group_id = turn.get("groupId") or ""
                 delivery_status = "failed"
+                delivery_reason = ""
                 if umo:
-                    delivery_status = await self._transport_send(umo, decision["groupReply"])
-                if delivery_status == "unknown":
-                    # 群消息同样区分“结果未知”：可能已发出，只留痕、不重发。
+                    raw_status = await self._transport_send(umo, decision["groupReply"])
+                    if raw_status == "unknown":
+                        # 群消息同样区分“结果未知”：可能已发出，只留痕、不重发。
+                        delivery_status = "pending"
+                        delivery_reason = "transport-timeout: 回执超时，结果未知"
+                    else:
+                        delivery_status = raw_status
+                if delivery_status == "pending":
                     self._log("warn", f"群消息投递超时（结果未知，不自动重试） 群频道={group_id}")
                 elif delivery_status == "failed":
                     self._log("error", f"群消息投递失败 群频道={group_id}")
@@ -1135,15 +1352,108 @@ class InterludeService:
                     "actor": "protagonist",
                     "content": decision["groupReply"],
                     "occurredAt": to_iso(now),
-                    "metadata": {"groupId": turn.get("groupId"), "deliveryStatus": delivery_status},
+                    "metadata": {
+                        "groupId": turn.get("groupId"),
+                        "deliveryStatus": delivery_status,
+                        **({"deliveryReason": delivery_reason} if delivery_reason else {}),
+                    },
                 }, now))
+            # 群回合的平台动作（原生表情/表情包/回应）落账并投递到群会话。
+            await self._deliver_group_platform_actions(
+                story, group_entry_id, decision, turn.get("umo") or "", now
+            )
             self._schedule_next_automatic_advance(story_id, now)
 
-    def has_pending_narrative(self, story_id: str) -> bool:
-        """故事是否有未完成写作（对应 hasPendingNarrative）。"""
-        return self.turn_engine.has_pending_narrative(
-            story_id, lambda target: bool(self._buffered_group_turns.get(target, {}).get("messages"))
+    def _normalize_group_reactions(
+        self, raw: Any, messages: Sequence[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """把模型给的 messageRef 解析成平台 messageId（对应 normalizeGroupChatActions）。"""
+        chat = self.config.get("chatActions") or {}
+        if not chat.get("enabled") or not chat.get("messageReactions", True):
+            return []
+        allowed = [str(item) for item in _pick(chat.get("allowedReactions"), list(self.QQ_REACTION_IDS))]
+        targets = {
+            str(message.get("messageRef") or ""): str(message.get("messageId") or "")
+            for message in messages
+            if message.get("messageRef") and message.get("messageId")
+        }
+        result: List[Dict[str, Any]] = []
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            reference = str(item.get("messageRef") or "")
+            reaction = str(item.get("reaction") or "")
+            target_id = targets.get(reference) or ""
+            if target_id and reaction in allowed:
+                result.append({"messageRef": reference, "reaction": reaction, "messageId": target_id})
+        return result[:1]
+
+    async def _deliver_group_platform_actions(
+        self,
+        story: Story,
+        script_entry_id: int,
+        decision: Dict[str, Any],
+        umo: str,
+        now: datetime,
+    ) -> None:
+        """群回合的平台动作：把决策里的动作写成账本并投递到群会话。"""
+        if not script_entry_id or not umo:
+            return
+        metadata: Dict[str, Any] = {}
+        if decision.get("localMedia"):
+            metadata["localMedia"] = decision["localMedia"]
+        if decision.get("nativeFace"):
+            metadata["nativeFace"] = decision["nativeFace"]
+        if decision.get("messageReactions"):
+            metadata["messageReactions"] = decision["messageReactions"]
+        if not metadata:
+            return
+        commit_id = f"group-action:{script_entry_id}"
+        event = {
+            "kind": "platform-action",
+            "actor": "protagonist",
+            "participantId": "",
+            "eventId": f"{commit_id}:e1",
+            "metadata": metadata,
+        }
+        actions = create_script_delivery_actions(
+            {"commitId": commit_id, "events": [event], "window": {"to": to_iso(now)}}
         )
+        if not actions:
+            return
+        row = self.db.first_row("interlude_script_entry", {"id": script_entry_id, "storyId": story.id})
+        if row:
+            entry_metadata = json_loads(row.get("metadata"), {}) or {}
+            entry_metadata["deliveryActions"] = actions
+            self.db.update_rows(
+                "interlude_script_entry", {"id": script_entry_id}, {"metadata": entry_metadata}
+            )
+        await self._deliver_platform_actions(
+            story,
+            None,
+            [{**event, "commitId": commit_id, "scriptEntryId": script_entry_id}],
+            now,
+            umo_override=umo,
+        )
+
+    def has_pending_narrative(self, story_id: str) -> bool:
+        """故事是否有未完成写作（对应 hasPendingNarrative）。
+
+        群缓冲键为 `(storyId, groupId)`：只要该故事下任一未刷写的群批次
+        存在，就算有未完成写作。群刷写自身改用 `_private_narrative_pending`，
+        否则会把自己算成"未完成"而永远排不上。
+        """
+        return self.turn_engine.has_pending_narrative(
+            story_id,
+            lambda target: any(
+                key[0] == target and bool(turn.get("messages"))
+                for key, turn in self._buffered_group_turns.items()
+            ),
+        )
+
+    def _private_narrative_pending(self, story_id: str) -> bool:
+        """只看私聊回合是否在写（群批次之间互不阻塞）。"""
+        return self.turn_engine.has_pending_narrative(story_id, lambda _target: False)
 
     # ------------------------------------------------------------------ #
     # 私聊回合刷写（核心管线）
@@ -1189,6 +1499,17 @@ class InterludeService:
             for message in batch:
                 image_sources.extend(message.get("imageSources") or [])
             request.images = await self._load_native_images(story, image_sources[:3])
+            vision_config = (self.config.get("model") or {}).get("vision") or {}
+            if (
+                request.images
+                and vision_config.get("enabled")
+                and str(vision_config.get("mode") or "native") == "sidecar"
+            ):
+                # 侧端识图：把图片转成事实观察，主叙事只读文字（对应 describeVisual）。
+                observation = await self.narrator.describe_visual(request.images)
+                if observation:
+                    request.visualObservations = [observation]
+                    request.images = []
             audio_sources: List[str] = []
             for message in batch:
                 audio_sources.extend(message.get("audioSources") or [])
@@ -1222,6 +1543,7 @@ class InterludeService:
                     success=bool(result.get("success")),
                 ),
             )
+            self._schedule_browser_intents(story, decision, participant.id, effective_now)
             if result.get("success") and decision.get("interaction", {}).get("reply", {}).get("mode") == "immediate":
                 turn.firstMessageCommittedRequestId = request_id
             if decision.get("interaction"):
@@ -1232,6 +1554,9 @@ class InterludeService:
             # 投递可见消息（首条打字下限按请求起始时间计算）
             await self._deliver_messages_for_participant(
                 story, participant, persisted.get("messages") or [], request_started, result.get("succeeded", False) and False
+            )
+            await self._deliver_platform_actions(
+                story, participant, persisted.get("platformActions") or [], effective_now
             )
             if result.get("success"):
                 await self.serial(turn.storyId, lambda: self._finish_turn(turn.storyId, participant.id, effective_now, request.dueIntents))
@@ -1295,7 +1620,12 @@ class InterludeService:
         participants.sort(key=participant_relevance, reverse=True)
         if participant:
             participants = [item for item in participants if item.id != participant.id] + [participant]
-        facts = await self._facts_for_prompt(story, participant)
+        query = (
+            next((entry.content for entry in reversed(selected) if entry.kind == "user-message"), "")
+            if phase == "user-message"
+            else ""
+        )
+        facts = await self._facts_for_prompt(story, participant, query)
         memories = await self.memories(story.id, int(self.memory_config.get("recentEntryLimit") or 10), participant.id if participant else "")
         scene = await self.active_scene(story.id)
         arc = await self.active_arc(story.id)
@@ -1348,6 +1678,8 @@ class InterludeService:
                 bool(self.shared_story.get("shareParticipantDetails")),
                 timezone_name=str(story.setting.get("timezone") or ""),
             ),
+            mediaCatalog=self._media_catalog(),
+            webContext=self._browser_observations(story.id),
             continuation=(
                 continuation_bookmark(recent, from_at, now) if phase == "user-message" else None
             ),
@@ -1355,6 +1687,42 @@ class InterludeService:
             splitReplyMessages=runtime.get("splitReplyMessages") is not False,
         )
         return request
+
+    async def _plan_timeline(
+        self, story: Story, request: NarrativeRequest, now: datetime
+    ) -> Optional[TimelinePlan]:
+        """自动回合的时间导演（对应 planTimeline）。
+
+        只给自动回合（advance / intent-due）提供"这一段生活怎么分配"的相对
+        账本；失败、关闭或输出不合法时返回 None，主叙事按无账本推进。
+        """
+        director = self.config.get("timelineDirector") or {}
+        if not director.get("enabled", True) or request.phase not in ("advance", "intent-due"):
+            return None
+        timezone = story.setting.get("timezone") or "UTC"
+        payload = {
+            "storyIdentity": {"setting": story.setting},
+            "interval": {
+                "from": to_iso(request.from_at),
+                "now": to_iso(now),
+                "timezone": timezone,
+            },
+            "lifeStatus": story.state.get("lifeStatus"),
+            "schedulePreplan": request.schedulePreplan,
+            "timelineCarry": story.state.get("timelineCarry") or [],
+            "recentScript": [
+                {"occurredAt": to_iso(entry.occurredAt), "content": clip(entry.content, 400)}
+                for entry in request.recentEntries[-6:]
+            ],
+        }
+        try:
+            plan = await self.narrator.plan_timeline(payload, self.config)
+        except Exception as error:  # noqa: BLE001 - 时间导演失败不能阻断推进
+            self._log("debug", f"时间导演失败，已降级为无账本推进：{error}")
+            return None
+        if not plan:
+            return None
+        return TimelinePlan(beats=plan.get("beats") or [], carry=plan.get("carry") or [])
 
     def _active_working_details(self, story: Story, now: datetime) -> List[Dict[str, Any]]:
         details = story.state.get("workingDetails") or []
@@ -1387,8 +1755,14 @@ class InterludeService:
             for row in reversed(rows)
         ]
 
-    async def _facts_for_prompt(self, story: Story, participant: Optional[Participant]) -> List[Fact]:
-        """事实检索：重要度/置信度/时间衰减/未解决加权（对应 12.2 事实排序）。"""
+    async def _facts_for_prompt(
+        self, story: Story, participant: Optional[Participant], query: str = ""
+    ) -> List[Fact]:
+        """事实检索：重要度/置信度/时间衰减/未解决加权（对应 12.2 事实排序）。
+
+        `model.embedding.enabled` 且 `liveQuery` 开启时，额外按当前用户文本
+        做一次语义相似度加权；没有向量的旧事实仍走规则排序。
+        """
         rows = self.db.list_rows("interlude_fact", {"storyId": story.id, "status": "active"})
         facts = [self._row_to_fact(row) for row in rows]
         if not facts:
@@ -1399,12 +1773,27 @@ class InterludeService:
         w_recency = float(memory.get("factRecencyWeight") or 0.15)
         w_unresolved = float(memory.get("unresolvedWeight") or 0.2)
         now_ts = now_utc().timestamp()
+        # 语义相似度（仅在显式开启时请求，避免每轮多一次网络调用）
+        semantic: Dict[int, float] = {}
+        embedding_config = (self.config.get("model") or {}).get("embedding") or {}
+        if embedding_config.get("enabled") and embedding_config.get("liveQuery") and query.strip():
+            query_vector = await self.embed_text(query)
+            if query_vector:
+                for fact in facts:
+                    if fact.embedding:
+                        semantic[id(fact)] = self._cosine(query_vector, fact.embedding)
 
         def score(fact: Fact) -> float:
             age_days = max(0.0, (now_ts - fact.lastSeenAt.timestamp()) / 86400)
             recency = 1.0 / (1.0 + age_days / 7.0)
             unresolved_bonus = w_unresolved if (fact.unresolved and fact.scope == "promise") else 0.0
-            return fact.importance * w_importance + fact.confidence * w_confidence + recency * w_recency + unresolved_bonus
+            return (
+                fact.importance * w_importance
+                + fact.confidence * w_confidence
+                + recency * w_recency
+                + unresolved_bonus
+                + semantic.get(id(fact), 0.0) * 0.35
+            )
 
         facts.sort(key=score, reverse=True)
         limit = int(self.runtime.get("memoryLimit") or 20)
@@ -1502,7 +1891,10 @@ class InterludeService:
         """
         story = await self.get_story(story_id)
         if story is None:
-            return {"messages": [], "commit": None, "scriptEntryId": None}
+            return {"messages": [], "commit": None, "scriptEntryId": None, "platformActions": []}
+        # 消息回应只属于群聊通道；私聊回合即使模型返回也丢弃。
+        decision = {**decision}
+        decision.pop("messageReactions", None)
         commit = decision_to_script_commit(
             story_id, phase, from_at, now, participant_id, decision,
             message_separator=str(self.runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR),
@@ -1522,9 +1914,27 @@ class InterludeService:
                 "phase": phase,
                 # rc57：状态演化按来源场景数判断 major 证据；旧条目没有该字段时按 1 个场景处理。
                 "sceneId": scene.id if scene else None,
+                # 网页观察意图留痕（真正执行由 _schedule_browser_intents 负责）。
+                "browserIntents": [
+                    event for event in commit["events"] if event.get("kind") == "browser-intent"
+                ] or None,
             },
         }, now, participant_id)
+        logging_config = self.config.get("logging") or {}
+        if logging_config.get("logScriptPreview"):
+            preview_length = int(_pick(logging_config.get("previewLength"), 500))
+            self._log("info", f"剧本预览 故事={story_id}：{clip(commit['prose'], preview_length)}")
         messages: List[Dict[str, Any]] = []
+        # 引用回复：把触发这条回复的消息 ID 透传到投递层（对应 typ-0 replyTo）。
+        reply_to = ""
+        if phase == "user-message" and (self.config.get("chatActions") or {}).get("quoteReply", True):
+            incoming = self.db.first_row(
+                "interlude_script_entry",
+                {"storyId": story_id, "kind": "user-message", "participantId": participant_id},
+                order_by="id DESC",
+            )
+            if incoming:
+                reply_to = str((json_loads(incoming.get("metadata"), {}) or {}).get("messageId") or "")
         for event in commit["events"]:
             if event["kind"] == "outgoing-message":
                 reference = {
@@ -1541,6 +1951,7 @@ class InterludeService:
                     "sendAt": event.get("occurredAt") if event.get("deliveryMode") == "delayed" else None,
                     "scriptEvent": reference,
                     "phase": phase,
+                    "replyTo": reply_to,
                 })
         # 记忆与意图落库
         for memory in decision.get("memories") or []:
@@ -1629,8 +2040,33 @@ class InterludeService:
                     return {**state, "automaticDeliverySummaries": prior[-6:]}
 
                 await self._update_story_state(story_id, add_summary, now)
+        # Urge：把本轮草案并入调度状态（basisQuote 必须逐字命中正文才采纳）
+        urge_config = urge_mod.resolve_urge_config(self.config.get("urge"))
+        if urge_config["enabled"] and script_entry_id and isinstance(decision.get("urge"), dict):
+            raw_urge = decision["urge"]
+
+            def apply_urge(state: Dict[str, Any]) -> Dict[str, Any]:
+                current = urge_mod.normalize_urge_state(state.get("urge"), now.timestamp())
+                committed = urge_mod.commit_urge(
+                    current, raw_urge, commit["prose"], script_entry_id,
+                    participant_id, now.timestamp(), urge_config,
+                )
+                return {**state, "urge": committed}
+
+            await self._update_story_state(story_id, apply_urge, now)
+        # 平台动作（原生表情 / 本地表情包 / 消息回应）单独成账，交给投递层消费
+        platform_actions = [
+            {**event, "scriptEntryId": script_entry_id}
+            for event in commit["events"]
+            if event.get("kind") == "platform-action"
+        ]
         # 剧情余波（active-consequence）在验证阶段已过 validIntent，这里直接作为意图写入
-        return {"messages": messages, "commit": commit, "scriptEntryId": script_entry_id}
+        return {
+            "messages": messages,
+            "commit": commit,
+            "scriptEntryId": script_entry_id,
+            "platformActions": platform_actions,
+        }
 
     async def _finish_turn(self, story_id: str, participant_id: str, now: datetime, due: Sequence[Intent]) -> None:
         """写作成功后的收尾：游标推进、到期意图结算、关系游标更新。"""
@@ -1768,6 +2204,7 @@ class InterludeService:
                     "payload": {
                         "content": message.get("content"),
                         "scriptEvent": message.get("scriptEvent"),
+                        "replyTo": message.get("replyTo") or "",
                         "automaticDelivery": {"summary": clip(message.get("content"), 240)} if is_automatic else None,
                     },
                     "createdAt": now_utc(),
@@ -1784,7 +2221,14 @@ class InterludeService:
                     if hold > 0:
                         await asyncio.sleep(hold / 1000.0)
                 first_bubble = False
-                outcome = await self._transport_send(target.channelId, bubble)
+                logging_config = self.config.get("logging") or {}
+                if logging_config.get("logMessageContent"):
+                    preview_length = int(_pick(logging_config.get("previewLength"), 500))
+                    self._log("info", f"发送消息 目标={target.id}：{clip(bubble, preview_length)}")
+                outcome = await self._transport_send(
+                    self._delivery_umo(target), bubble,
+                    reply_to=str(message.get("replyTo") or "") if index == 0 else "",
+                )
                 reference = dict(message.get("scriptEvent") or {})
                 if reference:
                     reference["segmentIndex"] = index
@@ -1822,20 +2266,288 @@ class InterludeService:
             state = dict(fresh.state or {})
             state["lastCharacterMessageAt"] = to_iso(now_utc())
             self.db.update_rows("interlude_participant", {"id": fresh.id}, {"state": state, "updatedAt": now_utc()})
+            await self._acknowledge_urge(story, participant, now_utc())
         return delivered
 
-    async def _transport_send(self, umo: str, text: str) -> str:
+    async def _acknowledge_urge(self, story: Story, participant: Participant, now: datetime) -> None:
+        """一次真实发生的主动投递把 urge 的"上膛"转成 burst 窗口。"""
+        config = urge_mod.resolve_urge_config(self.config.get("urge"))
+        if not config["enabled"]:
+            return
+        state = urge_mod.normalize_urge_state(story.state.get("urge"), now.timestamp())
+        armed = state.get("armed")
+        if not armed:
+            return
+        updated = urge_mod.acknowledge_urge(
+            state, participant.id, int(armed.get("entryId") or 0), now.timestamp()
+        )
+        if updated is state:
+            return
+        await self._update_story_state(story.id, lambda current: {**current, "urge": updated}, now)
+
+    #: QQ 原生表情语义 → 官方 face id。只用于 `chatActions.allowedNativeFaces`
+    #: 允许的语义；未登记的语义会以 `cancelled` 落账，而不是永久 pending。
+    NATIVE_FACE_IDS: Dict[str, str] = {
+        "smile": "14",
+        "laugh": "182",
+        "sweat": "27",
+        "awkward": "111",
+        "heart": "66",
+        "surprised": "0",
+        "sad": "5",
+        "angry": "106",
+        "cry": "5",
+        "shy": "6",
+        "cool": "16",
+        "confused": "32",
+        "sleepy": "8",
+    }
+
+    #: QQ 消息回应 → OneBot `set_msg_emoji_like` 的 emoji_id（与上游一致）。
+    QQ_REACTION_IDS: Dict[str, str] = {
+        "like": "76",
+        "smile": "14",
+        "laugh": "182",
+        "heart": "66",
+        "surprised": "0",
+        "sad": "5",
+        "angry": "106",
+    }
+
+    _STICKER_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    _STICKER_AUDIO_EXT = (".mp3", ".wav", ".ogg", ".silk", ".amr", ".m4a")
+
+    async def _deliver_platform_actions(
+        self,
+        story: Story,
+        default_participant: Optional[Participant],
+        actions: Sequence[Dict[str, Any]],
+        now: datetime,
+        umo_override: str = "",
+    ) -> None:
+        """投递平台动作（原生表情 / 本地表情包 / 消息回应）。
+
+        每条 segment 独立回写账本：
+        - 成功 → `delivered`；
+        - 回执超时 → `pending`（可能已送达，不重发）；
+        - 确定失败 → `failed`；
+        - 未启用、素材不存在、平台无此能力 → `cancelled` 并写原因。
+        """
+        if not actions:
+            return
+        chat = self.config.get("chatActions") or {}
+        stickers = self.config.get("stickers") or {}
+        for action in actions:
+            participant_id = action.get("participantId") or (
+                default_participant.id if default_participant else ""
+            )
+            if default_participant is not None and participant_id == default_participant.id:
+                target = default_participant
+            elif participant_id:
+                target = await self.get_participant(participant_id)
+            else:
+                target = None
+            if target is None and not umo_override:
+                continue
+            umo = umo_override or self._delivery_umo(target)
+            for segment in delivery_segments(action):
+                reference = {
+                    "commitId": action.get("commitId"),
+                    "eventId": action.get("eventId"),
+                    "scriptEntryId": action.get("scriptEntryId"),
+                    "segmentIndex": segment.get("index"),
+                }
+                kind = segment.get("kind")
+                content = str(segment.get("content") or "")
+                outcome = "cancelled"
+                reason = ""
+                if not umo:
+                    reason = "no-delivery-endpoint"
+                elif kind == "native-face":
+                    allowed = [str(item) for item in (chat.get("allowedNativeFaces") or [])]
+                    face_id = self.NATIVE_FACE_IDS.get(content)
+                    if not chat.get("enabled"):
+                        reason = "chatActions 未启用"
+                    elif not chat.get("nativeFaces", True):
+                        reason = "chatActions.nativeFaces 已关闭"
+                    elif content not in allowed:
+                        reason = f"表情语义不在 allowedNativeFaces：{content}"
+                    elif face_id is None:
+                        reason = f"未登记的 QQ 表情语义：{content}"
+                    else:
+                        outcome = await self._transport_call("send_face", umo, face_id)
+                elif kind == "local-media":
+                    if not stickers.get("enabled"):
+                        reason = "stickers 未启用"
+                    else:
+                        path = self._resolve_sticker(content)
+                        if path is None:
+                            reason = f"素材不存在：{content}"
+                        else:
+                            media_kind = "audio" if path.lower().endswith(self._STICKER_AUDIO_EXT) else "image"
+                            outcome = await self._transport_call("send_media", umo, path, media_kind)
+                elif kind == "message-reaction":
+                    _, _, reaction = content.partition(":")
+                    allowed = [str(item) for item in _pick(chat.get("allowedReactions"), list(self.QQ_REACTION_IDS))]
+                    emoji_id = self.QQ_REACTION_IDS.get(reaction)
+                    target_id = str(segment.get("targetId") or "")
+                    if not chat.get("enabled"):
+                        reason = "chatActions 未启用"
+                    elif not chat.get("messageReactions", True):
+                        reason = "chatActions.messageReactions 已关闭"
+                    elif reaction not in allowed:
+                        reason = f"回应不在 allowedReactions：{reaction}"
+                    elif emoji_id is None:
+                        reason = f"未登记的回应类型：{reaction}"
+                    elif not target_id:
+                        reason = "回应目标缺少平台消息 ID"
+                    elif not hasattr(self._transport, "send_reaction"):
+                        reason = "unsupported: 当前适配器没有 send_reaction"
+                    else:
+                        outcome = await self._transport_call("send_reaction", umo, target_id, emoji_id)
+                else:
+                    reason = f"未知动作类型：{kind}"
+                if outcome == "delivered":
+                    await self._mark_segment_delivered(story.id, reference, "delivered", "delivery-ok")
+                elif outcome == "unknown":
+                    await self._mark_segment_delivered(
+                        story.id, reference, "pending", "transport-timeout: 回执超时，结果未知"
+                    )
+                elif outcome == "failed":
+                    await self._mark_segment_delivered(story.id, reference, "failed", "transport-error")
+                    self._log("warn", f"平台动作投递失败 类型={kind} 目标={participant_id}")
+                else:
+                    # cancelled 不可被后续覆盖：这是对"本移植做不到"的明确记录。
+                    await self._mark_segment_delivered(story.id, reference, "cancelled", reason or "cancelled")
+                    self._log("debug", f"平台动作跳过 类型={kind} 原因={reason}")
+
+    async def _transport_call(self, method: str, *args: Any) -> str:
+        """调用平台适配器的可选方法，统一三态返回（缺失方法视为确定失败）。"""
+        handler = getattr(self._transport, method, None)
+        if not callable(handler):
+            return "failed"
+        try:
+            result = await handler(*args)
+        except DeliveryUnknown as error:
+            self._log("warn", f"{method} 结果未知（可能已送达，不自动重试）：{error.reason}")
+            return "unknown"
+        except Exception as error:  # noqa: BLE001 - 动作投递失败不能影响回合
+            self._log("warn", f"{method} 失败：{error}")
+            return "failed"
+        if isinstance(result, str) and result in ("delivered", "failed", "unknown"):
+            return result
+        return "delivered" if bool(result) else "failed"
+
+    def sticker_root(self) -> str:
+        """本地表情包根目录。
+
+        相对路径优先按插件数据目录解析；若该目录不存在但当前工作目录下
+        存在同名目录，则使用工作目录（兼容上游默认的 `data/hds-interlude/stickers`）。
+        """
+        raw = str((self.config.get("stickers") or {}).get("directory") or "data/hds-interlude/stickers")
+        if not os.path.isabs(raw):
+            candidate = os.path.join(self.data_dir, raw)
+            if not os.path.isdir(candidate):
+                cwd_candidate = os.path.abspath(raw)
+                if os.path.isdir(cwd_candidate):
+                    return cwd_candidate
+            raw = candidate
+        return os.path.abspath(raw)
+
+    @staticmethod
+    def _inside_root(root_real: str, candidate: str) -> bool:
+        """判断真实路径是否仍在素材根目录内（挡符号链接/junction 越界）。"""
+        try:
+            return os.path.commonpath([root_real, candidate]) == root_real
+        except ValueError:  # Windows 跨盘符
+            return False
+
+    def _sticker_files(self) -> List[str]:
+        """扫描素材目录（带 60 秒缓存），只返回图片/语音且体积合规的文件。
+
+        使用 `realpath` 双侧边界判定：root 内的符号链接/junction 指向目录外时
+        直接跳过（对应上游 rc56 的表情包回源 realpath 加固）。
+        """
+        cached = getattr(self, "_sticker_cache", None)
+        now = time.time()
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        root = self.sticker_root()
+        root_real = os.path.realpath(root)
+        limit = int(_pick((self.config.get("stickers") or {}).get("maxFileSizeMB"), 10)) * 1024 * 1024
+        files: List[str] = []
+        if os.path.isdir(root):
+            for folder, _dirs, names in os.walk(root):
+                for name in names:
+                    if not name.lower().endswith(self._STICKER_IMAGE_EXT + self._STICKER_AUDIO_EXT):
+                        continue
+                    path = os.path.join(folder, name)
+                    real = os.path.realpath(path)
+                    if not self._inside_root(root_real, real):
+                        self._log("warn", f"表情包越界，已跳过：{path}")
+                        continue
+                    try:
+                        if os.path.getsize(real) > limit:
+                            continue
+                    except OSError:
+                        continue
+                    files.append(real)
+        files.sort()
+        self._sticker_cache = (now, files)
+        return files
+
+    def _resolve_sticker(self, asset_id: str) -> Optional[str]:
+        """把 `localMedia.assetId` 解析为真实文件路径。
+
+        支持三种写法：`相对路径（不含扩展名）`、`文件名（不含扩展名）`、
+        `一级分组/文件名`。拒绝 `..` 与绝对路径，防止越权读取。
+        """
+        asset = (asset_id or "").strip().replace("\\", "/")
+        if not asset or asset.startswith("/") or ".." in asset.split("/"):
+            return None
+        root = os.path.realpath(self.sticker_root())
+        target = asset.lower()
+        for path in self._sticker_files():
+            relative = os.path.relpath(path, root).replace("\\", "/")
+            without_ext = os.path.splitext(relative)[0]
+            stem = os.path.splitext(os.path.basename(relative))[0]
+            if target in (without_ext.lower(), stem.lower()) or without_ext.lower().endswith("/" + target):
+                return path
+        return None
+
+    def _media_catalog(self) -> List[Dict[str, Any]]:
+        """提供给主模型的可用素材清单（只含真实存在的 assetId）。"""
+        stickers = self.config.get("stickers") or {}
+        if not stickers.get("enabled"):
+            return []
+        limit = int(_pick(stickers.get("catalogLimit"), 40))
+        root = os.path.realpath(self.sticker_root())
+        catalog: List[Dict[str, Any]] = []
+        for path in self._sticker_files()[:limit]:
+            relative = os.path.relpath(path, root).replace("\\", "/")
+            without_ext = os.path.splitext(relative)[0]
+            catalog.append({
+                "assetId": without_ext,
+                "kind": "audio" if path.lower().endswith(self._STICKER_AUDIO_EXT) else "image",
+                "group": without_ext.split("/")[0] if "/" in without_ext else "",
+            })
+        return catalog
+
+    async def _transport_send(self, umo: str, text: str, reply_to: str = "") -> str:
         """经平台层发送一条文本消息，返回投递状态。
 
         返回 `"delivered"` / `"failed"` / `"unknown"`：
         - `unknown` 表示请求已写出但回执超时（`DeliveryUnknown`）——消息可能
           已经到达，账本必须记 `pending`，且不得自动重试（对应上游 rc53/rc56）；
         - 其余异常一律按确定失败处理，允许补偿重试。
+
+        `reply_to` 是触发消息 ID（对应 typ-0 的 replyTo 透传）；由平台层组装
+        `Reply` 组件，服务层不关心平台消息段格式。
         """
         if not umo or not text:
             return "failed"
         try:
-            return "delivered" if bool(await self._transport.send(umo, text)) else "failed"
+            return "delivered" if bool(await self._transport.send(umo, text, reply_to)) else "failed"
         except DeliveryUnknown as error:
             self._log("warn", f"消息投递结果未知（可能已送达，不自动重试）：{error.reason}")
             return "unknown"
@@ -2019,6 +2731,7 @@ class InterludeService:
             return []
         request = await self._build_request(story, None, phase, from_at, now)
         request.dueIntents = due
+        request.timelinePlan = await self._plan_timeline(story, request, now)
         result = await self._run_narrative(story, request)
         if not result.get("success"):
             # 自动回合失败：记录重试门（timelineRetryAt），不冻结推进
@@ -2029,7 +2742,11 @@ class InterludeService:
             })
             return []
         decision = result["decision"]
+        # 时间导演的 carry 作为下一段生活的连续性提示（主叙事自带的优先）。
+        if request.timelinePlan and request.timelinePlan.carry and not decision.get("timelineCarry"):
+            decision["timelineCarry"] = list(request.timelinePlan.carry)
         persisted = await self._persist_turn(story_id, "", decision, from_at, now, phase)
+        self._schedule_browser_intents(story, decision, "", now)
         # 自动回合的主动联系：交叉行动投递 + agency 目标
         messages = list(persisted.get("messages") or [])
         immediate = [message for message in messages if message.get("mode") == "immediate"]
@@ -2038,6 +2755,11 @@ class InterludeService:
                 target = await self.get_participant(message.get("participantId") or "")
                 if target:
                     await self._deliver_messages_for_participant(story, target, [message], 0.0, is_automatic=True)
+        # 自动回合的平台动作：按参与者分别投递（原生表情/表情包/回应）
+        for action in persisted.get("platformActions") or []:
+            target = await self.get_participant(action.get("participantId") or "")
+            if target:
+                await self._deliver_platform_actions(story, target, [action], now)
         await self._finish_turn(story_id, "", now, due)
         await self._apply_proactive_contact(story, decision, now)
         await self._apply_auto_decision_side_effects(story, decision, now)
@@ -2138,6 +2860,39 @@ class InterludeService:
         interval = int(runtime.get("autoAdvanceIntervalMinutes") or 40)
         jitter = int(runtime.get("autoAdvanceJitterMinutes") or 5)
         timezone_name = story.setting.get("timezone") or "UTC"
+        # Urge 开启时用弹性算法替代固定间隔（对应 planUrge）：
+        # 生活节奏 / 对话密度 / 休息窗口 / burst 窗口共同决定下一次推进。
+        urge_config = urge_mod.resolve_urge_config(self.config.get("urge"))
+        if urge_config["enabled"]:
+            stamp = now.timestamp()
+            urge_state = urge_mod.normalize_urge_state(story.state.get("urge"), stamp)
+            rest = urge_mod.rest_minutes_for(now, timezone_name, self._rest_windows())
+            participant_rows = self.db.list_rows(
+                "interlude_participant", {"storyId": story_id, "status": "active"}
+            )
+            unavailable = not any(row.get("channelId") for row in participant_rows)
+            planned = urge_mod.plan_urge(
+                urge_state, stamp, urge_config, rest, unavailable,
+                rhythm=urge_mod.rhythm_from_state(urge_state, stamp),
+            )
+            next_at = planned["nextAdvanceAt"]
+
+            async def save_urge() -> None:
+                await self._update_story_state(
+                    story_id, lambda state: {**state, "urge": planned["state"]}, now
+                )
+                await self._set_automation(story_id, {
+                    "nextAdvanceAt": to_iso(next_at),
+                    "urgeReason": planned["reason"],
+                })
+
+            asyncio.ensure_future(save_urge())
+            self._log(
+                "debug",
+                f"Urge 排程 原因={planned['reason']} 间隔={planned['minutes']:.1f}分钟",
+            )
+            self.scheduler.schedule_wake(story_id, next_at.timestamp(), lambda: asyncio.ensure_future(self.sweep()))
+            return
         # 休息窗口内使用其自己的推进节奏
         for window in self._rest_windows():
             if window.get("enabled") is False:
@@ -2189,7 +2944,10 @@ class InterludeService:
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
                 content = clip(payload.get("content"), int(self.runtime.get("maxMessageCharacters") or 1500))
                 if participant and content:
-                    outcome = await self._transport_send(participant.channelId, content)
+                    outcome = await self._transport_send(
+                        self._delivery_umo(participant), content,
+                        reply_to=str(payload.get("replyTo") or ""),
+                    )
                     reference = payload.get("scriptEvent") or {}
                     await self._mark_segment_delivered(
                         story.id,
@@ -2223,7 +2981,10 @@ class InterludeService:
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
                 content = clip((intent.payload or {}).get("content"), int(self.runtime.get("maxMessageCharacters") or 1500))
                 if participant and participant.status == "active" and content:
-                    outcome = await self._transport_send(participant.channelId, content)
+                    outcome = await self._transport_send(
+                        self._delivery_umo(participant), content,
+                        reply_to=str((intent.payload or {}).get("replyTo") or ""),
+                    )
                     reference = (intent.payload or {}).get("scriptEvent") or {}
                     if reference:
                         await self._mark_segment_delivered(
@@ -2284,28 +3045,37 @@ class InterludeService:
     # ------------------------------------------------------------------ #
 
     async def sweep(self) -> None:
-        """后台扫描：发现到期任务（对应 sweep，不做重复工作）。"""
+        """后台扫描：发现到期任务（对应 sweep，不做重复工作）。
+
+        每轮最多处理 `runtime.maxStoriesPerSweep` 个活跃故事（默认 20），
+        按最近更新排序；单个故事失败不影响其余故事。
+        """
         if self._paused:
             return
-        story = await self.get_canonical_story()
-        if story is None or not self.can_handle_story(story):
+        limit = max(1, int(_pick(self.runtime.get("maxStoriesPerSweep"), 20)))
+        rows = self.db.list_rows(
+            "interlude_story", {"status": "active"}, order_by="updatedAt DESC", limit=limit
+        )
+        if not rows:
             return
-        if self.has_pending_narrative(story.id):
-            # 前台回合中：仅独立检查到期分段投递
+        for row in rows:
+            story = self._row_to_story(row)
+            if not self.can_handle_story(story):
+                continue
             now = now_utc()
-            await self._process_due_intents(story, now)
-            return
-        now = now_utc()
-        try:
-            await self._process_due_intents(story, now)
-            if self._advance_due(story, now):
-                messages = await self.advance_story(story, False)
-                if messages:
-                    self._log("debug", f"后台推进完成 可见消息={len(messages)}")
-            else:
-                self._schedule_next_automatic_advance(story.id, now)
-        except Exception as error:  # noqa: BLE001 - 后台任务容错
-            self._log("warn", f"后台扫描失败：{error}")
+            try:
+                await self._process_due_intents(story, now)
+                if self.has_pending_narrative(story.id):
+                    # 前台回合中：仅独立检查到期分段投递
+                    continue
+                if self._advance_due(story, now):
+                    messages = await self.advance_story(story, False)
+                    if messages:
+                        self._log("debug", f"后台推进完成 故事={story.id} 可见消息={len(messages)}")
+                else:
+                    self._schedule_next_automatic_advance(story.id, now)
+            except Exception as error:  # noqa: BLE001 - 背景任务容错
+                self._log("warn", f"后台扫描失败 故事={story.id}：{error}")
 
     async def background_loop(self) -> None:
         """常驻后台循环：扫描 / 整理 / 天气 / 播种（由插件层启动）。"""
@@ -2316,6 +3086,7 @@ class InterludeService:
                 await self._maybe_background_compaction()
                 await self.weather_sweep()
                 await self.world_seeder_sweep()
+                await self.backfill_fact_embeddings()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001
@@ -2669,6 +3440,31 @@ class InterludeService:
         norm_a = math.sqrt(sum(a * a for a in left))
         norm_b = math.sqrt(sum(b * b for b in right))
         return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+    async def backfill_fact_embeddings(self) -> None:
+        """后台补齐长期事实的向量（对应 embedding.backfillBatchSize）。
+
+        只在 `model.embedding.enabled` 且存在 `useForEmbedding` 连接时运行；
+        每轮最多补 `backfillBatchSize` 条，失败静默跳过（不影响叙事）。
+        """
+        config = (self.config.get("model") or {}).get("embedding") or {}
+        if not config.get("enabled"):
+            return
+        if not self.narrator.providers_for("useForEmbedding"):
+            return
+        story = await self.get_canonical_story()
+        if story is None:
+            return
+        batch = max(1, int(_pick(config.get("backfillBatchSize"), 5)))
+        rows = self.db.list_rows(
+            "interlude_fact", {"storyId": story.id, "status": "active"},
+            order_by="lastSeenAt DESC", limit=max(60, batch * 4),
+        )
+        missing = [row for row in rows if not row.get("embedding")][:batch]
+        for row in missing:
+            vector = await self.embed_text(row.get("content") or "")
+            if vector:
+                self.db.update_rows("interlude_fact", {"id": row["id"]}, {"embedding": vector})
 
     # ------------------------------------------------------------------ #
     # 场景记忆查询（命令用）
@@ -3094,6 +3890,190 @@ class InterludeService:
     # 天气与世界事件播种（扩展 15 / 19）
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # 网页观察（browser，自包含 httpx 实现）
+    # ------------------------------------------------------------------ #
+
+    def _browser_config(self) -> Dict[str, Any]:
+        return self.config.get("browser") or {}
+
+    async def _browser_domain_allowed(self, url: str, config: Dict[str, Any]) -> bool:
+        """域名白/黑名单 + 私网地址拦截（避免 SSRF）。"""
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower().strip(".")
+        if not host:
+            return False
+        blocked = [str(item).lower().strip(".") for item in config.get("blockedDomains") or []]
+        allowed = [str(item).lower().strip(".") for item in config.get("allowedDomains") or []]
+
+        def matches(domain: str) -> bool:
+            return bool(domain) and (host == domain or host.endswith("." + domain))
+
+        if any(matches(domain) for domain in blocked):
+            return False
+        if allowed and not any(matches(domain) for domain in allowed):
+            return False
+        try:
+            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+        except Exception:  # noqa: BLE001 - 解析失败视为不可访问
+            return False
+        for info in infos:
+            address = str(info[4][0]).split("%")[0]
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+
+    def _browser_cache_hit(self, story_id: str, query: str, url: str, minutes: int) -> bool:
+        if minutes <= 0:
+            return False
+        since = now_utc() - timedelta(minutes=minutes)
+        rows = self.db.list_rows(
+            "interlude_web_observation", {"storyId": story_id, "status": "ready"},
+            order_by="accessedAt DESC", limit=50,
+        )
+        for row in rows:
+            accessed = ensure_utc(row.get("accessedAt"))
+            if accessed is not None and accessed < since:
+                continue
+            if url and row.get("url") == url:
+                return True
+            if query and row.get("query") == query:
+                return True
+        return False
+
+    async def _browser_observe(
+        self, mode: str, query: str, url: str, config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """执行一次搜索或访问，返回 `{status,url,title,excerpt,summary}`。"""
+        import httpx
+
+        max_text = max(500, int(config.get("maxTextCharacters") or 12000))
+        max_excerpt = max(100, int(config.get("maxExcerptCharacters") or 3000))
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; HDSInterlude/1.0; +https://gitee.com/MomoiCore/HDS-Interlude)",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+        }
+        target = url
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
+                if mode == "search":
+                    template = str(config.get("searchUrlTemplate") or "https://html.duckduckgo.com/html/?q={query}")
+                    if "{query}" not in template:
+                        template = "https://html.duckduckgo.com/html/?q={query}"
+                    search_url = template.replace("{query}", quote_plus(query))
+                    if not await self._browser_domain_allowed(search_url, config):
+                        return {"status": "blocked", "url": search_url, "title": "", "excerpt": "", "summary": "搜索地址被域名策略拒绝"}
+                    response = await client.get(search_url)
+                    if response.status_code >= 400:
+                        return {"status": "failed", "url": search_url, "title": "", "excerpt": "", "summary": f"搜索 HTTP {response.status_code}"}
+                    target = first_search_result(response.text, search_url)
+                    if not target:
+                        return {"status": "empty", "url": search_url, "title": "", "excerpt": "", "summary": "没有找到可用结果"}
+                if not await self._browser_domain_allowed(target, config):
+                    return {"status": "blocked", "url": target, "title": "", "excerpt": "", "summary": "目标地址被域名策略拒绝"}
+                response = await client.get(target)
+                if response.status_code >= 400:
+                    return {"status": "failed", "url": target, "title": "", "excerpt": "", "summary": f"HTTP {response.status_code}"}
+                page = parse_html_page(response.text)
+        except Exception as error:  # noqa: BLE001 - 观察失败只记状态
+            return {"status": "failed", "url": target, "title": "", "excerpt": "", "summary": f"抓取失败：{error}"}
+        text = (page.get("text") or "")[:max_text]
+        excerpt = text[:max_excerpt]
+        return {
+            "status": "ready" if excerpt else "empty",
+            "url": target,
+            "title": (page.get("title") or target)[:300],
+            "excerpt": excerpt,
+            "summary": excerpt[:500],
+        }
+
+    async def _execute_browser_intents(
+        self, story: Story, decision: Dict[str, Any], participant_id: str, now: datetime
+    ) -> None:
+        """执行延迟网页观察（deferred-only；immediate 会被跳过并留日志）。"""
+        config = self._browser_config()
+        if not config.get("enabled"):
+            return
+        intents = decision.get("browserIntents") or []
+        for intent in intents[:1]:
+            if not isinstance(intent, dict):
+                continue
+            timing = str(intent.get("timing") or "deferred")
+            if timing == "immediate" and str(config.get("mode") or "deferred-only") == "deferred-only":
+                self._log("debug", "网页观察 immediate 请求在 deferred-only 模式下已跳过")
+                continue
+            mode = str(intent.get("mode") or "search")
+            query = str(intent.get("query") or "").strip()
+            url = str(intent.get("url") or "").strip()
+            if mode == "search" and not config.get("allowSearch", True):
+                continue
+            if mode == "visit" and not config.get("allowVisit", True):
+                continue
+            if self._browser_cache_hit(
+                story.id, query, url, int(config.get("cacheMinutes") or 30)
+            ):
+                self._log("debug", f"网页观察命中缓存：{query or url}")
+                continue
+            result = await self._browser_observe(mode, query, url, config)
+            self.db.insert_row("interlude_web_observation", {
+                "storyId": story.id,
+                "participantId": participant_id,
+                "intentId": 0,
+                "mode": mode,
+                "query": query,
+                "url": result.get("url") or url,
+                "title": clip(result.get("title") or "", 300),
+                "excerpt": clip(result.get("excerpt") or "", 12000),
+                "summary": clip(result.get("summary") or "", 1000),
+                "status": result.get("status") or "failed",
+                "accessedAt": now,
+                "createdAt": now,
+            })
+            self._log(
+                "info" if result.get("status") == "ready" else "debug",
+                f"网页观察 {result.get('status')}：{result.get('title') or query or url}",
+            )
+
+    def _schedule_browser_intents(
+        self, story: Story, decision: Dict[str, Any], participant_id: str, now: datetime
+    ) -> None:
+        if not decision.get("browserIntents") or not self._browser_config().get("enabled"):
+            return
+
+        async def run() -> None:
+            try:
+                await self._execute_browser_intents(story, decision, participant_id, now)
+            except Exception as error:  # noqa: BLE001 - 观察失败不影响叙事
+                self._log("debug", f"网页观察任务失败：{error}")
+
+        asyncio.ensure_future(run())
+
+    def _browser_observations(self, story_id: str) -> List[Dict[str, Any]]:
+        """最近 24 小时内可用的网页观察（进入下一轮 webContext）。"""
+        cutoff = now_utc() - timedelta(hours=24)
+        rows = self.db.list_rows(
+            "interlude_web_observation", {"storyId": story_id, "status": "ready"},
+            order_by="accessedAt DESC", limit=5,
+        )
+        observations: List[Dict[str, Any]] = []
+        for row in rows:
+            accessed = ensure_utc(row.get("accessedAt"))
+            if accessed is not None and accessed < cutoff:
+                continue
+            observations.append({
+                "title": row.get("title") or "",
+                "url": row.get("url") or "",
+                "excerpt": clip(row.get("excerpt") or "", 3000),
+                "accessedAt": to_iso(accessed) if accessed else "",
+            })
+        return observations
+
     async def weather_sweep(self) -> None:
         """运行时天气：Open-Meteo 拉取并以 [世界事件] 注入（滚动替换）。"""
         weather = self.config.get("weather") or {}
@@ -3107,8 +4087,10 @@ class InterludeService:
         if time.time() - self._last_weather_at < cadence:
             return
         self._last_weather_at = time.time()
-        latitude = float(weather.get("latitude") or 39.14)
-        longitude = float(weather.get("longitude") or 117.18)
+        if weather.get("skipFantasyWorld") and self._is_fantasy_world(story):
+            self._log("debug", "架空世界已跳过天气注入（weather.skipFantasyWorld）")
+            return
+        latitude, longitude = await self._weather_coordinates(story, weather)
         try:
             import httpx
 
@@ -3146,6 +4128,71 @@ class InterludeService:
             "occurredAt": to_iso(now),
             "metadata": {"source": "weather"},
         }, now)
+
+    #: 判定"架空世界"的关键词。只在 weather.skipFantasyWorld 开启时生效。
+    _FANTASY_MARKERS = (
+        "异世界", "魔法", "精灵", "龙族", "幻想", "架空", "修仙", "仙侠",
+        "星际", "赛博", "末世", "奇幻", "深渊", "神域", "魔物",
+    )
+
+    def _is_fantasy_world(self, story: Story) -> bool:
+        """按世界/地点/角色描述判定是否架空世界（保守：命中任一关键词即跳过）。"""
+        setting = story.setting or {}
+        text = " ".join(
+            str(setting.get(key) or "")
+            for key in ("world", "location", "character", "supportingCast", "relationship")
+        )
+        return any(marker in text for marker in self._FANTASY_MARKERS)
+
+    async def _weather_coordinates(self, story: Story, weather: Dict[str, Any]) -> Tuple[float, float]:
+        """解析观测点：`autoFromLocation` 开启时按故事地点做地理编码。
+
+        结果缓存在 `story.state["weatherLocation"]`；编码失败回退到配置的
+        经纬度，不阻断天气注入。
+        """
+        default = (
+            float(weather.get("latitude") or 39.14),
+            float(weather.get("longitude") or 117.18),
+        )
+        if not weather.get("autoFromLocation", True):
+            return default
+        cached = (story.state or {}).get("weatherLocation")
+        if isinstance(cached, dict):
+            try:
+                return float(cached["latitude"]), float(cached["longitude"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        place = str(story.setting.get("location") or "").strip()
+        if not place:
+            return default
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=12) as client:
+                response = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": place[:80], "count": 1, "language": "zh", "format": "json"},
+                )
+            results = (response.json() or {}).get("results") or []
+            first = results[0] if results else None
+            if not isinstance(first, dict):
+                return default
+            latitude = float(first["latitude"])
+            longitude = float(first["longitude"])
+        except Exception as error:  # noqa: BLE001 - 地理编码失败按配置回退
+            self._log("debug", f"天气观测点解析失败（{place}）：{error}")
+            return default
+        now = now_utc()
+        record = {
+            "name": str(first.get("name") or place),
+            "latitude": latitude,
+            "longitude": longitude,
+            "resolvedAt": to_iso(now),
+        }
+        await self._update_story_state(
+            story.id, lambda state: {**state, "weatherLocation": record}, now
+        )
+        return latitude, longitude
 
     async def world_seeder_sweep(self) -> None:
         """世界事件播种器：低频检查，多数输出空（对应 worldSeeder）。"""

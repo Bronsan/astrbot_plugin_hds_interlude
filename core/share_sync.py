@@ -32,6 +32,46 @@ def normalize_share_code(value: Any) -> str:
     return text
 
 
+def extract_share_code(value: Any) -> str:
+    """从分享码或完整链接中取出分享码。
+
+    支持：
+    - 裸分享码：`ABCD-1234`；
+    - typ0 链接：`https://typ0.space/p/ABCD-1234`、`/preset/ABCD-1234`；
+    - 查询参数：`?code=ABCD-1234`、`?shareCode=...`。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    direct = normalize_share_code(text)
+    if direct:
+        return direct
+    try:
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    for key in ("code", "shareCode", "preset", "share"):
+        for candidate in parse_qs(parsed.query).get(key) or []:
+            code = normalize_share_code(candidate)
+            if code:
+                return code
+    segments = [part for part in parsed.path.split("/") if part]
+    # 只接受明确的路径形态：/p/<code>、/preset/<code>、/share/<code>、/s/<code>
+    for index, segment in enumerate(segments[:-1]):
+        if segment.lower() in ("p", "preset", "share", "s"):
+            code = normalize_share_code(segments[index + 1])
+            if code:
+                return code
+    # 兜底：末段必须带数字或连字符，避免把 /about 这类页面名当分享码。
+    if segments and re.search(r"[0-9-]", segments[-1]):
+        code = normalize_share_code(segments[-1])
+        if code:
+            return code
+    return normalize_share_code(parsed.fragment)
+
+
 def sanitize_share_payload(payload: Any) -> Any:
     """递归剔除连接类敏感字段（对应 sanitizeSharePayload）。"""
     if isinstance(payload, dict):

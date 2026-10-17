@@ -7,14 +7,18 @@ from typing import Any
 
 
 class Context:
-    """Context 桩：send_message 记录发送。"""
+    """Context 桩：send_message 记录发送，可注入平台实例。"""
 
     def __init__(self):
         self.sent: list[tuple[str, Any]] = []
+        self.platform_inst = None
 
     async def send_message(self, umo: str, chain: Any) -> bool:
         self.sent.append((umo, chain))
         return True
+
+    def get_platform_inst(self, platform_id: str):
+        return self.platform_inst
 
 
 class Star:

@@ -486,6 +486,31 @@ def pick_participant_state_patch(value: Any) -> Optional[Dict[str, Any]]:
     return patch or None
 
 
+def normalize_browser_intents(value: Any) -> List[Dict[str, Any]]:
+    """归一网页观察意图（只允许 search/visit，最多 1 条）。"""
+    if not isinstance(value, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        query = item.get("query") if isinstance(item.get("query"), str) else ""
+        url = item.get("url") if isinstance(item.get("url"), str) else ""
+        mode = item.get("mode") if item.get("mode") in ("search", "visit") else ("search" if query.strip() else "visit")
+        if mode == "search" and not query.strip():
+            continue
+        if mode == "visit" and not url.strip():
+            continue
+        result.append({
+            "mode": mode,
+            "timing": "immediate" if item.get("timing") == "immediate" else "deferred",
+            "purpose": clip(item.get("purpose"), 300) if isinstance(item.get("purpose"), str) else "",
+            "query": clip(query, 300),
+            "url": clip(url, 2000),
+        })
+    return result[:1]
+
+
 def normalize_decision(
     raw: Dict[str, Any],
     from_at: datetime,
@@ -584,6 +609,7 @@ def normalize_decision(
         "localMedia": raw.get("localMedia") if isinstance(raw.get("localMedia"), dict) else None,
         "nativeFace": raw.get("nativeFace") if isinstance(raw.get("nativeFace"), dict) else None,
         "messageReactions": raw.get("messageReactions") if isinstance(raw.get("messageReactions"), list) else None,
+        "browserIntents": normalize_browser_intents(raw.get("browserIntents")),
         "droppedProactiveActions": dropped,
     }
     return result
@@ -809,6 +835,26 @@ def decision_to_script_commit(
             "content": intent.get("summary"),
             "metadata": {"type": intent.get("type"), "notBefore": intent.get("notBefore")},
         })
+    for browser in decision.get("browserIntents") or []:
+        if not isinstance(browser, dict):
+            continue
+        purpose = browser.get("purpose") or browser.get("query") or browser.get("url")
+        if not isinstance(purpose, str) or not purpose.strip():
+            continue
+        add({
+            "kind": "browser-intent",
+            "actor": "protagonist",
+            "occurredAt": to_iso(now),
+            "causedByEventIds": [narrative["eventId"]],
+            "participantId": participant_id,
+            "content": clip(purpose, 300),
+            "metadata": {
+                "mode": browser.get("mode") if browser.get("mode") in ("search", "visit") else "search",
+                "timing": "immediate" if browser.get("timing") == "immediate" else "deferred",
+                "query": clip(browser.get("query"), 300) if isinstance(browser.get("query"), str) else "",
+                "url": clip(browser.get("url"), 2000) if isinstance(browser.get("url"), str) else "",
+            },
+        })
     if decision.get("localMedia") or decision.get("nativeFace") or decision.get("messageReactions"):
         metadata: Dict[str, Any] = {}
         if decision.get("localMedia"):
@@ -896,6 +942,7 @@ def delivery_segments(event: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "index": len(segments),
                 "kind": "message-reaction",
                 "content": f"{reaction['messageRef']}:{reaction['reaction']}",
+                "targetId": str(reaction.get("messageId") or ""),
                 "status": "pending",
             })
     return segments

@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import os
 import sys
+import tempfile
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE, "tests", "stubs"))
@@ -222,12 +225,15 @@ async def main() -> None:
         async def _timeout_send(umo, chain):
             raise asyncio.TimeoutError("platform timeout")
 
+        original_send = plugin.context.send_message
         plugin.context.send_message = _timeout_send  # type: ignore[assignment]
         try:
             await plugin.transport.send("umo", "文本")
             timeout_raised = False
         except DeliveryUnknown:
             timeout_raised = True
+        finally:
+            plugin.context.send_message = original_send  # type: ignore[assignment]
         check("回执超时抛 DeliveryUnknown", timeout_raised, "")
 
         # 12) 日志层防御：logger 抛错不影响调用（对应上游 rc55 writeReport 防御）
@@ -255,6 +261,170 @@ async def main() -> None:
         check("rc57 剧本默认 1400", runtime["maxScriptCharacters"]["default"] == 1400, str(runtime["maxScriptCharacters"]))
         check("rc57 消息默认 1500", runtime["maxMessageCharacters"]["default"] == 1500, str(runtime["maxMessageCharacters"]))
         check("rc57 重试默认 15 秒", runtime["narrativeRetryDelaySeconds"]["default"] == 15, str(runtime["narrativeRetryDelaySeconds"]))
+
+        # 14) 原生表情 / 本地素材投递组件
+        plugin.context.sent.clear()
+        face_ok = await plugin.transport.send_face("umo-face", "14")
+        media_ok = await plugin.transport.send_media("umo-media", __file__, "image")
+        missing = await plugin.transport.send_media("umo-media", "/nonexistent/file.png", "image")
+        face_chain = plugin.context.sent[0][1].chain[0] if plugin.context.sent else None
+        media_chain = plugin.context.sent[1][1].chain[0] if len(plugin.context.sent) > 1 else None
+        check("send_face 组件正确", bool(face_ok) and getattr(face_chain, "id", None) == 14, str(face_chain))
+        check("send_media 组件正确", bool(media_ok) and str(getattr(media_chain, "file", "")).endswith("plugin_harness_test.py"), str(media_chain))
+        check("缺失素材确定失败", missing is False, str(missing))
+
+        # 14b) replyTo 透传：Reply 组件 + 文本
+        plugin.context.sent.clear()
+        reply_ok = await plugin.transport.send("umo-reply", "文本", "m-42")
+        reply_chain = plugin.context.sent[0][1].chain if plugin.context.sent else []
+        check(
+            "replyTo 生成 Reply 组件",
+            bool(reply_ok) and len(reply_chain) == 2 and getattr(reply_chain[0], "id", None) == "m-42",
+            str(reply_chain),
+        )
+
+        # 14c) 图片按 vision.maxImageDimension 缩放（AstrBot 自带 Pillow）
+        try:
+            from PIL import Image as PILImage
+
+            config["model"]["vision"] = {
+                "enabled": True, "mode": "native", "detail": "auto", "maxImageDimension": 40,
+            }
+            image_path = os.path.join(tempfile.gettempdir(), "hdsi-vision-resize.png")
+            PILImage.new("RGB", (120, 60), (200, 20, 20)).save(image_path)
+            data_uri, _mime = await plugin.transport.fetch_image_data_uri(image_path)
+            raw = base64.b64decode(data_uri.split(",", 1)[1])
+            with PILImage.open(io.BytesIO(raw)) as resized:
+                check("图片按 maxImageDimension 缩放", max(resized.size) <= 40, str(resized.size))
+        except ImportError:
+            pass
+
+        # 14d) SILK 识别与缺库降级（AstrBot 默认自带 silk-python）
+        check("SILK 魔数识别", plugin_main._is_silk(b"#!SILK_V3xxxx"), "")
+        check("非 SILK 不误判", not plugin_main._is_silk(b"ID3xxxx", "mp3"), "")
+        check("SILK 解码失败可降级", plugin_main._decode_silk_to_wav(b"#!SILK_V3garbage") is None, "")
+
+        # 15) 日志级别过滤（logging.level）
+        records: list[tuple[str, str]] = []
+
+        class _Recorder:
+            def info(self, message, *args):
+                records.append(("info", message))
+
+            def warning(self, message, *args):
+                records.append(("warn", message))
+
+            def error(self, message, *args):
+                records.append(("error", message))
+
+            def debug(self, message, *args):
+                records.append(("debug", message))
+
+        original_logger = plugin_main.astrbot_logger
+        plugin_main.astrbot_logger = _Recorder()  # type: ignore[assignment]
+        config["logging"] = {"level": "error", "previewLength": 50}
+        try:
+            plugin._log("info", "应被过滤")
+            plugin._log("error", "应被保留")
+        finally:
+            plugin_main.astrbot_logger = original_logger  # type: ignore[assignment]
+        check("日志级别过滤生效", [item[0] for item in records] == ["error"], str(records))
+
+        # 16) 合并转发展开（runtime.forwardMessage）
+        from astrbot.api.message_components import Node, Nodes, Plain
+
+        config["runtime"]["forwardMessage"] = {
+            "enabled": True, "maxNodes": 30, "maxCharacters": 2000, "maxDepth": 3,
+        }
+
+        node_one = Node(content=[Plain("第一句")], name="阿宁", uin="1")
+        node_two = Node(content=[Plain("第二句")], name="小林", uin="2")
+        forward_event = AstrMessageEvent(message_str="", components=[Nodes(nodes=[node_one, node_two])])
+        forward_session = await plugin._session(forward_event)
+        check(
+            "合并转发展开",
+            "阿宁: 第一句" in forward_session.content and "小林: 第二句" in forward_session.content,
+            forward_session.content,
+        )
+        config["runtime"]["forwardMessage"]["maxNodes"] = 1
+        limited = await plugin._session(forward_event)
+        check(
+            "合并转发节点预算",
+            "阿宁: 第一句" in limited.content and "第二句" not in limited.content,
+            limited.content,
+        )
+
+        # 17) 平台 API：get_forward_msg 与 set_msg_emoji_like
+        from astrbot.api.message_components import Forward
+
+        calls: list[tuple[str, dict]] = []
+
+        class _Client:
+            async def call_action(self, action, **kwargs):
+                calls.append((action, kwargs))
+                if action == "get_forward_msg":
+                    return {
+                        "messages": [
+                            {
+                                "sender": {"nickname": "阿宁"},
+                                "message": [{"type": "text", "data": {"text": "平台展开的转发"}}],
+                            }
+                        ]
+                    }
+                return {"retcode": 0}
+
+        class _Platform:
+            def get_client(self):
+                return _Client()
+
+        plugin.context.platform_inst = _Platform()
+        ref_event = AstrMessageEvent(message_str="", components=[Forward(id="f-1")])
+        ref_session = await plugin._session(ref_event)
+        check("Forward 经平台 API 展开", "平台展开的转发" in ref_session.content, ref_session.content)
+        reaction_ok = await plugin.transport.send_reaction("p1:GroupMessage:g1", "m-1", "76")
+        check(
+            "回应走 set_msg_emoji_like",
+            bool(reaction_ok) and any(item[0] == "set_msg_emoji_like" for item in calls),
+            str(calls),
+        )
+        plugin.context.platform_inst = None
+
+        # 18) Type0 内置导入：没有消息事件也能拉取并应用
+        config["presetSync"] = {
+            "enabled": True,
+            "baseUrl": "https://example.test",
+            "shareCode": "TEST-1234",
+            "autoUpdate": True,
+            "sections": ["runtime"],
+            "applyToCurrentStory": False,
+        }
+        preset_payload = {
+            "code": "TEST-1234",
+            "title": "测试预设",
+            "revision": "r1",
+            "sections": ["runtime"],
+            "payload": {"runtime": {"userMessageDebounceSeconds": 1.5}},
+        }
+        original_fetch = plugin_main.fetch_share
+
+        async def _fake_fetch(base, code, timeout=15.0):
+            return preset_payload
+
+        plugin_main.fetch_share = _fake_fetch  # type: ignore[assignment]
+        try:
+            applied, reason = await plugin._run_preset_sync(None, None, force=True)
+        finally:
+            plugin_main.fetch_share = original_fetch  # type: ignore[assignment]
+        check(
+            "Type0 无事件导入",
+            bool(applied) and config["runtime"]["userMessageDebounceSeconds"] == 1.5,
+            reason,
+        )
+        check(
+            "Type0 记录 revision",
+            (plugin.service.load_preset_sync_snapshot() or {}).get("revision") == "r1",
+            str(plugin.service.load_preset_sync_snapshot()),
+        )
     finally:
         await plugin.terminate()
 
