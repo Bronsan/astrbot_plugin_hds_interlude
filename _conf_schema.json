@@ -1,0 +1,420 @@
+{
+  "storyDefaults": {
+    "description": "【必填 1】故事档案：主角、世界、默认关系、地点、时区与叙事风格。只在新故事创建时写入 Canon。",
+    "type": "object",
+    "items": {
+      "characterName": { "description": "主角名称。", "type": "string", "default": "Unnamed character" },
+      "characterProfile": { "description": "主角身份、性格、作息、习惯、压力和行为边界。", "type": "text", "default": "" },
+      "perspective": { "description": "主角个体价值观 / 看待世界的方式（独立于 Canon 的外壳人格层）。", "type": "text", "default": "" },
+      "perspectives": { "description": "多条独立价值观/视角（每条一段，作为独立条目注入）。", "type": "list", "default": [] },
+      "supplementaryFacts": { "description": "补充事实（复杂的世界/人物/关系事实），作为初始长期事实注入。", "type": "list", "default": [] },
+      "userProfile": { "description": "没有账号专属资料时使用的默认用户背景。", "type": "text", "default": "" },
+      "relationship": { "description": "新参与者与主角的默认初始关系。", "type": "text", "default": "" },
+      "world": { "description": "故事时代、地点与现实规则。", "type": "text", "default": "" },
+      "supportingCast": { "description": "配角及其与主角的关系；无配角可留空。", "type": "text", "default": "" },
+      "location": { "description": "主角主要活动地点。", "type": "string", "default": "" },
+      "style": { "description": "故事级叙事文风（优先于全局 stylePrompt）。", "type": "text", "default": "现实主义日常叙事，情绪克制，关系变化缓慢而具体。" },
+      "timezone": { "description": "IANA 时区，例如 Asia/Shanghai。", "type": "string", "default": "Asia/Shanghai" }
+    }
+  },
+  "model": {
+    "description": "【必填 2】模型中心：连接、用途路由与主叙事参数。",
+    "type": "object",
+    "items": {
+      "providersJson": {
+        "description": "模型连接（JSON 数组，优先级最高）。每行字段：label/mode/enabled/endpoint/apiKey/model/useForMain/useForCompaction/useForAlter/useForEmbedding/useForStickers/useForVision/useForWorldSeeding/proxyAgent/deepseekThinking/deepseekReasoningEffort/extraHeaders/extraBody/priceInput/priceOutput/priceCachedInput。示例见 README。",
+        "type": "text",
+        "default": ""
+      },
+      "providers": {
+        "description": "模型连接行（对象行在 AstrBot 配置页会退化为字符串；推荐改用上方 providersJson 或直接编辑配置文件）。",
+        "type": "list",
+        "default": []
+      },
+      "mainTemperature": { "description": "主叙事采样温度。", "type": "float", "default": 0.8 },
+      "mainTopP": { "description": "主叙事 top-p。", "type": "float", "default": 1.0 },
+      "mainMaxTokens": { "description": "主叙事最大输出 token 数。", "type": "int", "default": 4096 },
+      "mainTimeout": { "description": "主叙事请求超时（毫秒）。", "type": "int", "default": 60000 },
+      "mainResponseFormat": { "description": "主叙事输出格式；不支持 JSON mode 时改 prompt-only。", "type": "string", "options": ["json-object", "prompt-only"], "default": "json-object" },
+      "failover": {
+        "description": "失败切换策略。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "主连接失败时尝试其它连接。", "type": "bool", "default": true },
+          "strategy": { "description": "priority 按配置顺序；round-robin 轮换。", "type": "string", "options": ["priority", "round-robin"], "default": "priority" },
+          "maxAttemptsPerProvider": { "description": "单条连接连续失败前的最大尝试次数。", "type": "int", "default": 1 },
+          "cooldownMinutes": { "description": "连接失败后的冷却时间（分钟）。", "type": "int", "default": 5 }
+        }
+      },
+      "mainPrompt": { "description": "主叙事创作方向（高级，一般留空使用内置默认）。", "type": "text", "default": "" },
+      "formatPrompt": { "description": "结构化输出补充规则。", "type": "text", "default": "" },
+      "fixedPrompt": { "description": "所有故事通用的长期约束。", "type": "text", "default": "" },
+      "stylePrompt": { "description": "全局文风（故事级 style 可覆盖）。", "type": "text", "default": "Use restrained, realistic prose with concrete daily details, natural pauses, and no forced drama." },
+      "vision": {
+        "description": "图片理解设置。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "启用图片理解。", "type": "bool", "default": false },
+          "mode": { "description": "native 主模型直接收图；sidecar 使用独立视觉连接。", "type": "string", "options": ["native", "sidecar"], "default": "native" },
+          "detail": { "description": "图片细节：low / high / auto。", "type": "string", "options": ["low", "high", "auto"], "default": "auto" },
+          "maxImageDimension": { "description": "图片最长边（像素）。", "type": "int", "default": 1024 }
+        }
+      },
+      "audio": {
+        "description": "原生语音/音频理解（要求主模型支持音频输入）。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "启用语音/音频原生理解。", "type": "bool", "default": false },
+          "outFormat": { "description": "音频转码格式。", "type": "string", "options": ["mp3", "wav", "ogg", "m4a", "flac", "amr"], "default": "mp3" },
+          "maxFileSizeMB": { "description": "单个音频附件上限（MB）。", "type": "int", "default": 10 },
+          "maxPerMessage": { "description": "每个事件最多接收的音频附件数。", "type": "int", "default": 1 }
+        }
+      },
+      "embedding": {
+        "description": "Embedding 语义检索。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "启用长期事实的语义检索。", "type": "bool", "default": false },
+          "semanticHistory": { "description": "启用历史语义召回（保留项）。", "type": "bool", "default": false },
+          "liveQuery": { "description": "每次实时对话额外请求 Embedding。", "type": "bool", "default": false },
+          "endpoint": { "description": "Embedding 完整地址；留空从 Chat 地址推导。", "type": "string", "default": "" },
+          "dimensions": { "description": "向量维度；0 由服务商决定。", "type": "int", "default": 0 },
+          "timeout": { "description": "向量请求超时（毫秒）。", "type": "int", "default": 10000 },
+          "maxInputCharacters": { "description": "单条文本送入 Embedding 的最大字符数。", "type": "int", "default": 4000 },
+          "backfillBatchSize": { "description": "每轮后台补齐向量的数量。", "type": "int", "default": 5 }
+        }
+      },
+      "compaction": {
+        "description": "后台压缩与侧端任务（时间导演/日程共用路由）。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "启用后台剧本压缩与长期事实提取。", "type": "bool", "default": true },
+          "temperature": { "description": "压缩采样温度。", "type": "float", "default": 0.3 },
+          "topP": { "description": "压缩 top-p。", "type": "float", "default": 1.0 },
+          "maxTokens": { "description": "压缩响应最大 token。", "type": "int", "default": 2048 },
+          "sideTaskMaxTokens": { "description": "侧端 JSON 任务（时间导演/日程）最大输出 token。", "type": "int", "default": 4096 },
+          "timeout": { "description": "压缩请求超时（毫秒）。", "type": "int", "default": 60000 },
+          "responseFormat": { "description": "压缩 JSON 模式。", "type": "string", "options": ["json-object", "prompt-only"], "default": "json-object" },
+          "mainPrompt": { "description": "压缩任务指令。", "type": "text", "default": "Compress completed scenes into concise continuity notes while preserving causality, promises, unresolved matters, and gradual character change." },
+          "fixedPrompt": { "description": "压缩器长期规则。", "type": "text", "default": "" },
+          "stylePrompt": { "description": "压缩结果表达风格。", "type": "text", "default": "Concise, factual, chronological, and concrete." }
+        }
+      }
+    }
+  },
+  "onebot": {
+    "description": "【必填 3】QQ / OneBot 接入：机器人账号、私聊白名单与群聊白名单。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用 OneBot 账号过滤（默认关闭不过滤）。", "type": "bool", "default": false },
+      "botAccountsJson": {
+        "description": "机器人账号白名单（JSON 数组，优先级最高）。行字段：qq、label、enabled。",
+        "type": "text",
+        "default": ""
+      },
+      "botAccounts": { "description": "机器人账号白名单（对象行列表）。", "type": "list", "default": [] },
+      "userAccountsJson": {
+        "description": "用户白名单与初始关系（JSON 数组，优先级最高）。行字段：qq、label、personId、profile、relationship、enabled。",
+        "type": "text",
+        "default": ""
+      },
+      "userAccounts": { "description": "用户白名单（对象行列表）。", "type": "list", "default": [] },
+      "groupChatsJson": {
+        "description": "群聊白名单（JSON 数组，优先级最高）。行字段：groupId、label、enabled、purpose、characterRole、responseMode(mention-only/always)、contextLimit、debounceSeconds、cooldownSeconds、historicalImageLimit、willingnessPreset(off/quiet/reserved/normal/active/eager/auto/custom)、willingnessAuto、willingness。",
+        "type": "text",
+        "default": ""
+      },
+      "groupChats": { "description": "群聊白名单（对象行列表）。", "type": "list", "default": [] },
+      "ignoreSelfMessages": { "description": "忽略机器人自身事件回显。", "type": "bool", "default": true }
+    }
+  },
+  "sharedStory": {
+    "description": "【结构 4】共享主剧本：多人参与、跨账号行为与管理员权限。",
+    "type": "object",
+    "items": {
+      "autoEnrollParticipants": { "description": "白名单用户首次私聊时自动加入现有主剧本。", "type": "bool", "default": true },
+      "allowCrossConversationMessages": { "description": "允许一次写作向其它合法参与者产生消息。", "type": "bool", "default": true },
+      "shareParticipantDetails": { "description": "是否向模型提供其它关系分支的原始历史（默认关闭）。", "type": "bool", "default": false },
+      "maxCrossConversationActions": { "description": "单回合跨账号动作上限。", "type": "int", "default": 1 },
+      "participantContextLimit": { "description": "单次请求携带的其它参与者摘要数量。", "type": "int", "default": 6 },
+      "managerAccounts": { "description": "有权执行全局管理命令的账号；留空表示所有已授权用户。", "type": "list", "default": [] }
+    }
+  },
+  "runtime": {
+    "description": "【节奏 5】运行时：消息合并、打字、失败重试与自动生活推进。",
+    "type": "object",
+    "items": {
+      "captureDirectMessages": { "description": "是否接管私聊。", "type": "bool", "default": true },
+      "autoCreate": { "description": "没有故事时是否从配置档案自动启动。", "type": "bool", "default": false },
+      "ignoreCommandMessages": { "description": "防止管理命令进入剧本。", "type": "bool", "default": true },
+      "userMessageDebounceSeconds": { "description": "合并连续私聊的静默等待时间（秒）。", "type": "float", "default": 2 },
+      "splitReplyMessages": { "description": "是否将回复中的 <sep/> 拆成多条消息。", "type": "bool", "default": true },
+      "messageSeparator": { "description": "分段消息标记。", "type": "string", "default": "<sep/>" },
+      "convertNewlineToSeparator": { "description": "小模型适配：把换行自动视作分段。", "type": "bool", "default": false },
+      "typingBaseDelaySeconds": { "description": "后续分段前的基础打字等待秒数。", "type": "float", "default": 1 },
+      "typingCharactersPerSecond": { "description": "模拟打字速度（字符/秒）。", "type": "float", "default": 8 },
+      "typingMaxDelaySeconds": { "description": "单条后续分段的最长打字等待秒数。", "type": "float", "default": 12 },
+      "typingJitterRatio": { "description": "打字延迟随机浮动；0 为固定延迟。", "type": "float", "default": 0.3 },
+      "narrativeRetryDelaySeconds": { "description": "叙事失败后自动重试前等待秒数。", "type": "int", "default": 60 },
+      "narrativeRetryMaxAttempts": { "description": "单次用户回合可自动重试的最多次数；0 关闭。", "type": "int", "default": 6 },
+      "allowProactiveMessages": { "description": "是否允许无新消息时的可见主动联系。", "type": "bool", "default": false },
+      "proactiveWillingnessThreshold": { "description": "主动联系意愿门槛。", "type": "float", "default": 0.65 },
+      "sweepIntervalMinutes": { "description": "后台扫描周期（分钟）。", "type": "int", "default": 5 },
+      "minimumAdvanceMinutes": { "description": "手动推进的最小有效补写间隔（分钟）。", "type": "int", "default": 30 },
+      "maxStoriesPerSweep": { "description": "单轮后台扫描最多处理的主剧本数量。", "type": "int", "default": 20 },
+      "contextEntryLimit": { "description": "写入主叙事上下文的近期原始条目数。", "type": "int", "default": 35 },
+      "contextTimeWindowMinutes": { "description": "额外并入最近多少分钟内的全部条目；0 关闭。", "type": "int", "default": 45 },
+      "memoryLimit": { "description": "主叙事携带的长期事实数量。", "type": "int", "default": 20 },
+      "maxScriptCharacters": { "description": "单次写作允许追加的剧本文本上限。", "type": "int", "default": 8000 },
+      "maxMessageCharacters": { "description": "单条可见消息的最大字符数。", "type": "int", "default": 2000 },
+      "minimumDelayedReplySeconds": { "description": "模型允许设置的最短延迟（秒）。", "type": "int", "default": 10 },
+      "maximumDelayedReplyMinutes": { "description": "模型允许设置的最长延迟（分钟）。", "type": "int", "default": 1440 },
+      "cancelDelayedRepliesOnUserMessage": { "description": "新消息到达时取消普通延迟回复。", "type": "bool", "default": true },
+      "autoAdvanceEnabled": { "description": "无对话时按真实时间补写角色生活。", "type": "bool", "default": true },
+      "autoAdvanceIntervalMinutes": { "description": "普通时段自动推进目标间隔（分钟）。", "type": "int", "default": 40 },
+      "autoAdvanceJitterMinutes": { "description": "自动推进间隔随机浮动（分钟）。", "type": "int", "default": 5 },
+      "conversationFollowUpMinutes": { "description": "对话结束后额外补写生活的时间点（分钟，默认约第 10、20 分钟）。", "type": "list", "default": [10, 20] },
+      "conversationFollowUpJitterMinutes": { "description": "短期补写随机浮动（分钟）。", "type": "int", "default": 1 },
+      "restWindowsJson": {
+        "description": "低频推进窗口（JSON 数组，优先级最高）。行字段：enabled、label、start(HH:mm)、end(HH:mm)、minIntervalMinutes、maxIntervalMinutes；可跨午夜。",
+        "type": "text",
+        "default": ""
+      },
+      "restWindows": { "description": "低频推进窗口（对象行列表；留空使用默认夜间 23:00-07:00）。", "type": "list", "default": [] },
+      "forwardMessage": {
+        "description": "QQ 合并转发读取预算（OneBot 平台扩展）。",
+        "type": "object",
+        "items": {
+          "enabled": { "description": "是否读取 QQ 合并转发正文。", "type": "bool", "default": true },
+          "maxNodes": { "description": "单条转发最多读取的节点数。", "type": "int", "default": 30 },
+          "maxCharacters": { "description": "注入当前事件的最大字符数。", "type": "int", "default": 8000 },
+          "maxDepth": { "description": "嵌套合并转发最大展开层数。", "type": "int", "default": 3 }
+        }
+      }
+    }
+  },
+  "urge": {
+    "description": "【节奏 6】Urge 弹性推进（保留项：开启后替代固定间隔调度；首版移植沿用固定间隔，见 README）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用弹性调度（总开关仍是 runtime.autoAdvanceEnabled）。", "type": "bool", "default": false },
+      "frequency": { "description": "推进频率档位。", "type": "string", "options": ["low", "medium", "high", "custom"], "default": "medium" },
+      "proactiveWillingnessThreshold": { "description": "仅 Urge 开启时的主动联系门槛。", "type": "float", "default": 0.4 }
+    }
+  },
+  "schedulePreplan": {
+    "description": "【节奏 7】日程预排：近期稳定日程与变化颗粒度；主提示词只读取未来约半天。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用近期日程生成、每日审查和半日投影。", "type": "bool", "default": true },
+      "horizonDays": { "description": "日程保存和展开天数。", "type": "int", "default": 14 },
+      "variationLevel": { "description": "变化颗粒度。", "type": "string", "options": ["stable", "contextual", "granular"], "default": "stable" },
+      "candidateActivationProbability": { "description": "候选变化激活概率（仅 granular）。", "type": "float", "default": 0.25 },
+      "candidateRevealMinutes": { "description": "候选具体内容提前揭示时间（分钟）。", "type": "int", "default": 120 },
+      "reviewAfterLocalHour": { "description": "每天本地时间几点后允许空闲审查。", "type": "int", "default": 3 },
+      "anchorAutoAdvance": { "description": "固定日程成为自动推进锚点。", "type": "bool", "default": true }
+    }
+  },
+  "timelineDirector": {
+    "description": "【节奏 8】时间导演：自动回合先生成相对时间账本。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用时间导演（失败降级为无账本推进）。", "type": "bool", "default": true }
+    }
+  },
+  "agency": {
+    "description": "【节奏 9】Agency 行动窗口：日程压力、隐私、设备与生活来源的联系条件。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用主体行动窗口。", "type": "bool", "default": false },
+      "maxWindowMinutes": { "description": "一张行动窗口最长有效时间（分钟）。", "type": "int", "default": 240 },
+      "minimumProactiveIntervalMinutes": { "description": "同一参与者普通主动联系的安全间隔（分钟）。", "type": "int", "default": 60 },
+      "maxCandidateHours": { "description": "联系候选最长保留时间（小时）。", "type": "int", "default": 24 },
+      "contactMode": { "description": "主动联系温度。", "type": "string", "options": ["strict", "natural", "balanced"], "default": "strict" },
+      "naturalWillingnessThreshold": { "description": "natural/balanced 模式的意愿阈值。", "type": "float", "default": 0.25 },
+      "naturalMinimumIntervalMinutes": { "description": "natural/balanced 模式的安全间隔（分钟）。", "type": "int", "default": 30 },
+      "proactiveDailyCap": { "description": "每参与者每 24 小时主动联系上限（0 = 不限）。", "type": "int", "default": 3 }
+    }
+  },
+  "chatActions": {
+    "description": "【表达 10】聊天动作：引用、反应与 QQ 原生表情（保留项：表情投递依赖平台连接器，首版支持原生表情发送）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用聊天动作。", "type": "bool", "default": false },
+      "quoteReply": { "description": "允许引用回复。", "type": "bool", "default": true },
+      "messageReactions": { "description": "允许消息表情回应。", "type": "bool", "default": true },
+      "nativeFaces": { "description": "允许发送 QQ 原生小表情。", "type": "bool", "default": true },
+      "expressionThreshold": { "description": "表情与表情包的最低表达意愿。", "type": "float", "default": 0.7 },
+      "allowedNativeFaces": { "description": "允许的原生表情语义。", "type": "list", "default": ["smile", "laugh", "sweat", "awkward"] }
+    }
+  },
+  "stickers": {
+    "description": "【表达 11】本地表情包（保留项：素材目录扫描与描述模型在首版为简化实现）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用本地表情包库。", "type": "bool", "default": false },
+      "directory": { "description": "本地表情包根目录；一级子文件夹成为素材分组。", "type": "string", "default": "data/hds-interlude/stickers" },
+      "maxFileSizeMB": { "description": "单个表情包允许扫描的最大体积（MB）。", "type": "int", "default": 10 },
+      "catalogLimit": { "description": "单次主模型最多读取的素材描述条数。", "type": "int", "default": 40 },
+      "descriptionMaxTokens": { "description": "单张表情包描述的最大输出 token。", "type": "int", "default": 768 }
+    }
+  },
+  "memory": {
+    "description": "【内在 12】记忆与连续性：场景压缩、事实召回、剧情余波和设定演化。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用场景压缩、长期事实和状态演化。", "type": "bool", "default": true },
+      "backgroundIntervalMinutes": { "description": "后台记忆整理检查周期（分钟）。", "type": "int", "default": 10 },
+      "sceneEntryThreshold": { "description": "未压缩剧本条目达到此数量时触发整理。", "type": "int", "default": 16 },
+      "sceneCharacterThreshold": { "description": "未压缩剧本字符数达到此值时触发整理。", "type": "int", "default": 10000 },
+      "recentEntryLimit": { "description": "每次主叙事请求附带的最近原始条目数。", "type": "int", "default": 30 },
+      "factLimit": { "description": "每次主叙事请求附带的长期事实数。", "type": "int", "default": 20 },
+      "compactionEntryLimit": { "description": "压缩模型单次读取的最大剧本条目数。", "type": "int", "default": 80 },
+      "compactionCharacterLimit": { "description": "压缩模型单次读取的最大字符数。", "type": "int", "default": 32000 },
+      "sceneHookCharacters": { "description": "场景引子最大字符数。", "type": "int", "default": 2000 },
+      "sceneSummaryCharacters": { "description": "场景摘要最大字符数。", "type": "int", "default": 8000 },
+      "arcSummaryCharacters": { "description": "剧情弧线摘要最大字符数。", "type": "int", "default": 12000 },
+      "previousSceneSummaries": { "description": "附带几个紧邻已关闭场景的摘要（0 关闭）。", "type": "int", "default": 2 },
+      "factContentCharacters": { "description": "单条长期事实最大字符数。", "type": "int", "default": 4000 },
+      "factImportanceWeight": { "description": "事实排序重要度权重。", "type": "float", "default": 0.5 },
+      "factConfidenceWeight": { "description": "事实排序置信度权重。", "type": "float", "default": 0.35 },
+      "factRecencyWeight": { "description": "事实排序时间衰减权重。", "type": "float", "default": 0.15 },
+      "semanticWeight": { "description": "语义相关度权重（Embedding 可用时）。", "type": "float", "default": 0.55 },
+      "unresolvedWeight": { "description": "未解决事项额外排序权重。", "type": "float", "default": 0.2 },
+      "autoApplyStatePatches": { "description": "是否自动应用达到门槛的设定演化建议。", "type": "bool", "default": true },
+      "allowMajorStateChanges": { "description": "是否允许自动应用重大状态变更。", "type": "bool", "default": true },
+      "statePatchConfidenceThreshold": { "description": "普通设定变更最低置信度。", "type": "float", "default": 0.82 },
+      "majorStatePatchConfidenceThreshold": { "description": "重大设定变更最低置信度。", "type": "float", "default": 0.95 },
+      "statePatchMinTurns": { "description": "普通变化至少需要的剧本回合数。", "type": "int", "default": 3 },
+      "statePatchMajorMinScenes": { "description": "重大变更自动应用所需最少独立场景数。", "type": "int", "default": 2 },
+      "statePatchMinDays": { "description": "普通变化至少跨越的日历日数。", "type": "int", "default": 2 },
+      "statePatchCooldownHours": { "description": "同一路径变化的冷却（小时）。", "type": "int", "default": 72 },
+      "maxFactsPerStory": { "description": "单个主剧本保留的长期事实总量上限。", "type": "int", "default": 200 },
+      "activeConsequencesEnabled": { "description": "启用剧情余波。", "type": "bool", "default": true },
+      "activeConsequencePromptLimit": { "description": "单次写作最多携带几条余波。", "type": "int", "default": 6 },
+      "activeConsequenceMaxDays": { "description": "一条余波最长保留天数。", "type": "int", "default": 7 },
+      "activeConsequenceDefaultStrength": { "description": "余波未写明强度时的默认影响程度。", "type": "float", "default": 0.55 },
+      "overlayCompressionEnabled": { "description": "把较早的 overlay 变化压缩为分层摘要。", "type": "bool", "default": true },
+      "overlayRecentDays": { "description": "最近多少天 overlay 保留原始细节。", "type": "int", "default": 2 },
+      "overlayWeeklySummaryCharacters": { "description": "单个短期 overlay 摘要最大字符数。", "type": "int", "default": 1600 },
+      "overlayMonthlySummaryCharacters": { "description": "单个长期 overlay 摘要最大字符数。", "type": "int", "default": 2400 }
+    }
+  },
+  "alterSystem": {
+    "description": "【内在 13】Alter 情绪：低频氛围偏移、动态阈值与侧端分析。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用情绪偏移追踪。", "type": "bool", "default": true },
+      "baseThreshold": { "description": "累计触发基础阈值。", "type": "float", "default": 10 },
+      "densityFactor": { "description": "写作密度降低阈值的比例。", "type": "float", "default": 0.3 },
+      "sameDirectionBoost": { "description": "同向每点 Alter 增加的权重。", "type": "float", "default": 0.05 },
+      "oppositeDecay": { "description": "反向每点 Alter 减少的权重。", "type": "float", "default": 0.15 },
+      "minWeight": { "description": "低于此值清除旧 offset。", "type": "float", "default": 0.2 },
+      "maxIntensity": { "description": "情绪偏移强度上限。", "type": "float", "default": 2 },
+      "temperature": { "description": "侧端分析温度。", "type": "float", "default": 0.3 },
+      "topP": { "description": "侧端分析 top-p。", "type": "float", "default": 1 },
+      "maxTokens": { "description": "侧端分析最大输出 token。", "type": "int", "default": 2000 },
+      "timeout": { "description": "侧端分析超时（毫秒）。", "type": "int", "default": 30000 },
+      "prompt": { "description": "侧端分析的附加要求。", "type": "text", "default": "" }
+    }
+  },
+  "browser": {
+    "description": "【扩展 14】网页观察（首版移植为 httpx 抓取，见 README 移植对照表；默认关闭）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用只读网页观察。", "type": "bool", "default": false },
+      "mode": { "description": "deferred-only 延后浏览；allow-immediate 允许即时浏览。", "type": "string", "options": ["deferred-only", "allow-immediate"], "default": "deferred-only" },
+      "allowSearch": { "description": "允许主角提出网页搜索意图。", "type": "bool", "default": true },
+      "allowVisit": { "description": "允许主角访问安全策略允许的公开网页。", "type": "bool", "default": true },
+      "searchUrlTemplate": { "description": "搜索地址模板，必须包含 {query}。", "type": "string", "default": "https://html.duckduckgo.com/html/?q={query}" },
+      "allowedDomains": { "description": "允许访问的域名白名单；留空不额外限制。", "type": "list", "default": [] },
+      "blockedDomains": { "description": "禁止访问的域名黑名单。", "type": "list", "default": [] },
+      "maxTextCharacters": { "description": "从网页正文提取的最大字符数。", "type": "int", "default": 12000 },
+      "maxExcerptCharacters": { "description": "单条网页观察送给主模型的最大字符数。", "type": "int", "default": 3000 },
+      "cacheMinutes": { "description": "相同搜索或 URL 的观察复用时间（分钟）。", "type": "int", "default": 30 }
+    }
+  },
+  "worldSeeder": {
+    "description": "【扩展 15】世界事件播种器：后台低频生成与主角有关的外部事件。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "总开关（仍需模型中心勾选「用于世界播种」）。", "type": "bool", "default": false },
+      "cadenceMinutes": { "description": "生成检查间隔（分钟）。", "type": "int", "default": 30 },
+      "maxPending": { "description": "同时挂起的未注入事件上限。", "type": "int", "default": 6 },
+      "dailyCap": { "description": "每 24 小时注入上限。", "type": "int", "default": 8 },
+      "maxHorizonHours": { "description": "事件最远发生时限（小时）。", "type": "int", "default": 72 },
+      "temperature": { "description": "生成温度。", "type": "float", "default": 0.9 },
+      "maxTokens": { "description": "单次输出预算（tokens）。", "type": "int", "default": 1000 },
+      "timeout": { "description": "请求超时（毫秒）。", "type": "int", "default": 60000 }
+    }
+  },
+  "longHorizon": {
+    "description": "【扩展 16】长线叙事指导（实验，保留项：首版未移植，见 README）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "总开关（首版保留配置，行为未接入）。", "type": "bool", "default": false },
+      "triggerScore": { "description": "首次生成加权分数门槛。", "type": "int", "default": 25 },
+      "reviewIncrement": { "description": "复审所需再积累分数。", "type": "int", "default": 40 },
+      "intensity": { "description": "指导强度。", "type": "string", "options": ["subtle", "moderate", "strong"], "default": "subtle" }
+    }
+  },
+  "qzone": {
+    "description": "【扩展 17】QQ 空间通道（保留项：需要 SnowLuma 兼容连接，AstrBot 平台层默认不可用）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用 QQ 空间通道。", "type": "bool", "default": false },
+      "dailyPostCap": { "description": "每日发帖上限（0=禁止）。", "type": "int", "default": 3 },
+      "dailyCommentCap": { "description": "每日评论上限（0=禁止）。", "type": "int", "default": 6 },
+      "dailyLikeCap": { "description": "每日点赞上限（0=禁止）。", "type": "int", "default": 12 },
+      "minIntervalMinutes": { "description": "任意两次空间动作最小间隔（分钟）。", "type": "int", "default": 90 },
+      "feedWindowMinutes": { "description": "好友动态轮询消费窗（分钟）。", "type": "int", "default": 120 }
+    }
+  },
+  "presetSync": {
+    "description": "【扩展 18】预设同步：从分享站拉取并应用配置（默认关闭）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用预设同步，需填写分享码。", "type": "bool", "default": false },
+      "baseUrl": { "description": "分享站地址。", "type": "string", "default": "https://typ0.space" },
+      "shareCode": { "description": "8 位分享码（大小写均可，可带连字符）。", "type": "string", "default": "" },
+      "autoUpdate": { "description": "重载时检查远端 revision，有新版本才应用。", "type": "bool", "default": false },
+      "sections": { "description": "要同步的分区（留空 = 预设里有什么就同步什么）。", "type": "list", "default": [] },
+      "applyToCurrentStory": { "description": "同时把 storyDefaults 应用到当前运行中的故事。", "type": "bool", "default": false }
+    }
+  },
+  "weather": {
+    "description": "【扩展 19】运行时天气：Open-Meteo 真实天气 → [世界事件] 注入（默认关闭）。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用运行时天气注入。", "type": "bool", "default": false },
+      "latitude": { "description": "观测点纬度。", "type": "float", "default": 39.14 },
+      "longitude": { "description": "观测点经度。", "type": "float", "default": 117.18 },
+      "autoFromLocation": { "description": "从故事地点自动解析观测点。", "type": "bool", "default": true },
+      "skipFantasyWorld": { "description": "架空世界跳过天气注入。", "type": "bool", "default": false },
+      "cadenceMinutes": { "description": "拉取间隔（分钟）。", "type": "int", "default": 30 }
+    }
+  },
+  "blindMode": {
+    "description": "【维护 20】盲区模式：沉浸运行，命令静默与最小健康心跳。",
+    "type": "object",
+    "items": {
+      "enabled": { "description": "启用失明模式；关闭并重载即可恢复管理。", "type": "bool", "default": false },
+      "healthReportMinutes": { "description": "健康心跳间隔（分钟）。", "type": "int", "default": 10 }
+    }
+  },
+  "logging": {
+    "description": "【维护 21】日志：级别与隐私预览（AstrBot 日志接管实际输出）。",
+    "type": "object",
+    "items": {
+      "level": { "description": "错误级别阈值。", "type": "string", "options": ["silent", "error", "warn", "info", "debug"], "default": "info" },
+      "logScriptPreview": { "description": "是否记录剧本正文预览。", "type": "bool", "default": false },
+      "logMessageContent": { "description": "是否记录用户和主角可见消息。", "type": "bool", "default": false },
+      "previewLength": { "description": "内容预览字符上限。", "type": "int", "default": 500 }
+    }
+  },
+  "mainPromptOverride": {
+    "description": "高级：系统主提示词的顶层覆盖（留空使用内置默认；出问题清空即可恢复）。",
+    "type": "text",
+    "default": ""
+  }
+}
