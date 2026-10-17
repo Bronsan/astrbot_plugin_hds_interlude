@@ -51,7 +51,7 @@ from .core.timeutil import format_log_time, format_story_display_time
 from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "v0.1.1"
+PLUGIN_VERSION = "v0.1.2"
 
 #: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
 TRANSPORT_TIMEOUT_SECONDS = 30

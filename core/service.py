@@ -143,6 +143,53 @@ def normalize_interlude_spacing(content: str, is_registered: Callable[[str], boo
     return None
 
 
+def narrative_turn_count(rows: Sequence[Dict[str, Any]]) -> int:
+    """独立叙事回合数（对应 rc57 `developmentTurns`）。
+
+    只有 `script` 条目（或 actor=narrator）算叙事回合；同一回合内的多条
+    用户消息/意图不会重复计数。上游用 `occurredAt` 毫秒时间戳去重，
+    这里保持一致。
+    """
+    keys = set()
+    for row in rows:
+        if row.get("kind") != "script" and row.get("actor") != "narrator":
+            continue
+        moment = ensure_utc(row.get("occurredAt"))
+        if moment is not None:
+            keys.add(moment.timestamp())
+    return len(keys)
+
+
+def state_patch_evidence(rows: Sequence[Dict[str, Any]], timezone: str) -> Dict[str, int]:
+    """状态演化证据（对应 rc57 `statePatchEvidence`）。
+
+    - turns：独立叙事回合数（不是参与者数）；
+    - days：故事本地日历日数；
+    - scenes：来源条目所属场景数（本移植在 script.metadata.sceneId 记录；
+      旧数据没有 sceneId 时按 1 个场景保守处理）。
+    """
+    narrative = [
+        row for row in rows
+        if row.get("kind") == "script" or row.get("actor") == "narrator"
+    ]
+    days = set()
+    scenes = set()
+    for row in narrative:
+        moment = ensure_utc(row.get("occurredAt"))
+        if moment is not None:
+            days.add(calendar_day_key(moment, timezone))
+        metadata = row.get("metadata")
+        if isinstance(metadata, str):
+            metadata = json_loads(metadata, {})
+        if isinstance(metadata, dict) and metadata.get("sceneId") is not None:
+            scenes.add(str(metadata["sceneId"]))
+    return {
+        "turns": narrative_turn_count(narrative),
+        "days": len(days),
+        "scenes": max(1, len(scenes)) if narrative else 0,
+    }
+
+
 class InterludeService:
     """HDSI 运行时服务（对应上游 InterludeService）。"""
 
@@ -809,7 +856,7 @@ class InterludeService:
 
         now = now_utc()
         content = sanitize_and_clamp_visible_content(
-            session.content, int(self.runtime.get("maxMessageCharacters") or 2000) * 4, DEFAULT_MESSAGE_SEPARATOR
+            session.content, int(self.runtime.get("maxMessageCharacters") or 1500) * 4, DEFAULT_MESSAGE_SEPARATOR
         )
         # 图片 / 语音占位；转发展开由平台层预处理（见 forward 模块）。
         image_sources = list(session.imageSources)
@@ -1046,13 +1093,18 @@ class InterludeService:
                     decision["groupReply"] = reply["content"]
             # 群回合的正文同样落库（对应群的 script 条目；群发言另行登记）
             if decision.get("script"):
+                scene = await self.active_scene(story_id)
                 await self.serial(story_id, lambda: self.append_entry(story_id, {
                     "kind": "script",
                     "actor": "protagonist",
                     "participantId": "",
                     "content": decision.get("script") or "",
                     "occurredAt": to_iso(now),
-                    "metadata": {"phase": "user-message", "groupTurn": True, "groupId": turn.get("groupId")},
+                    "metadata": {
+                        "phase": "user-message", "groupTurn": True,
+                        "groupId": turn.get("groupId"),
+                        "sceneId": scene.id if scene else None,
+                    },
                 }, now))
             self.db.update_rows("interlude_story", {"id": story_id}, {"cursorAt": now, "updatedAt": now_utc()})
             if decision.get("groupReply"):
@@ -1226,8 +1278,8 @@ class InterludeService:
     ) -> NarrativeRequest:
         """装配一次叙事请求的上下文（对应 tryDecide 的上下文部分）。"""
         runtime = self.runtime
-        entry_limit = int(runtime.get("contextEntryLimit") or 35)
-        window_minutes = int(_pick(runtime.get("contextTimeWindowMinutes"), 45))
+        entry_limit = int(runtime.get("contextEntryLimit") or 17)
+        window_minutes = int(_pick(runtime.get("contextTimeWindowMinutes"), 6))
         recent = await self.recent_entries(story.id, max(entry_limit * 2, 60))
         cutoff = now - timedelta(minutes=window_minutes) if window_minutes > 0 else None
         selected = recent[-entry_limit:]
@@ -1294,6 +1346,7 @@ class InterludeService:
                 selected,
                 participant.id if participant else "",
                 bool(self.shared_story.get("shareParticipantDetails")),
+                timezone_name=str(story.setting.get("timezone") or ""),
             ),
             continuation=(
                 continuation_bookmark(recent, from_at, now) if phase == "user-message" else None
@@ -1456,6 +1509,7 @@ class InterludeService:
             split_reply_messages=self.runtime.get("splitReplyMessages") is not False,
         )
         delivery_actions = create_script_delivery_actions(commit)
+        scene = await self.active_scene(story_id)
         script_entry_id = await self.append_entry(story_id, {
             "kind": "script",
             "actor": "protagonist",
@@ -1466,6 +1520,8 @@ class InterludeService:
                 "commitId": commit["commitId"],
                 "deliveryActions": delivery_actions,
                 "phase": phase,
+                # rc57：状态演化按来源场景数判断 major 证据；旧条目没有该字段时按 1 个场景处理。
+                "sceneId": scene.id if scene else None,
             },
         }, now, participant_id)
         messages: List[Dict[str, Any]] = []
@@ -1840,7 +1896,7 @@ class InterludeService:
             self._log("warn", f"叙事重试达到上限 {max_attempts} 次，停止重试 参与者={participant_id}")
             return
         entry["attempts"] += 1
-        delay = max(5, int(self.runtime.get("narrativeRetryDelaySeconds") or 60))
+        delay = max(5, int(self.runtime.get("narrativeRetryDelaySeconds") or 15))
         self._pending_retries[key] = entry
         self.db.insert_row("interlude_intent", {
             "storyId": story_id,
@@ -2131,7 +2187,7 @@ class InterludeService:
                     self.db.update_rows("interlude_intent", {"id": intent.id, "status": "pending"}, {"status": "completed", "updatedAt": now})
                     continue
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
-                content = clip(payload.get("content"), int(self.runtime.get("maxMessageCharacters") or 2000))
+                content = clip(payload.get("content"), int(self.runtime.get("maxMessageCharacters") or 1500))
                 if participant and content:
                     outcome = await self._transport_send(participant.channelId, content)
                     reference = payload.get("scriptEvent") or {}
@@ -2165,7 +2221,7 @@ class InterludeService:
                     await self._mark_segment_delivered(story.id, reference, "cancelled", "delivery-target-unavailable")
             elif intent.type == "delayed-message":
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
-                content = clip((intent.payload or {}).get("content"), int(self.runtime.get("maxMessageCharacters") or 2000))
+                content = clip((intent.payload or {}).get("content"), int(self.runtime.get("maxMessageCharacters") or 1500))
                 if participant and participant.status == "active" and content:
                     outcome = await self._transport_send(participant.channelId, content)
                     reference = (intent.payload or {}).get("scriptEvent") or {}
@@ -2785,15 +2841,27 @@ class InterludeService:
             if not entry_ids:
                 continue
             rows = self.db.list_rows("interlude_script_entry", {"id": {"$in": entry_ids}, "storyId": story.id})
-            turns = {row.get("participantId") or "global" for row in rows}
-            days = {calendar_day_key(ensure_utc(row.get("occurredAt")) or now, story.setting.get("timezone") or "UTC") for row in rows}
+            evidence = state_patch_evidence(rows, story.setting.get("timezone") or "UTC")
             if patch.impact == "major":
-                scene_ids = {row.get("storyId") for row in rows}
-                scenes = self.db.count_rows("interlude_scene", {"storyId": story.id, "status": "closed"})
-                if scenes + len(scene_ids) < major_min_scenes:
+                # 重大变化仍要求独立场景证据（对应 rc57 保留的 major 约束）。
+                if evidence["scenes"] < major_min_scenes:
+                    self._log(
+                        "debug",
+                        f"Overlay 候选继续累计 目标={patch.target}/{patch.path} 影响=major "
+                        f"场景={evidence['scenes']}/{major_min_scenes} 回合={evidence['turns']} "
+                        f"日期={evidence['days']} 置信度={patch.confidence:.2f}/{major_threshold:.2f}",
+                    )
                     continue
             else:
-                if len(turns) < min_turns or len(days) < min_days:
+                # rc57 Issue #8：普通提案按独立叙事回合、而不是参与者/场景数判断，
+                # 否则单场景长故事会永远停在 1 个"回合"。
+                if evidence["turns"] < min_turns or evidence["days"] < min_days:
+                    self._log(
+                        "debug",
+                        f"Overlay 候选继续累计 目标={patch.target}/{patch.path} 影响=minor "
+                        f"回合={evidence['turns']}/{min_turns} 场景={evidence['scenes']} "
+                        f"日期={evidence['days']}/{min_days} 置信度={patch.confidence:.2f}/{confidence_threshold:.2f}",
+                    )
                     continue
             # 同路径冷却
             applied_rows = self.db.list_rows(

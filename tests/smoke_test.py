@@ -18,6 +18,7 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -26,10 +27,16 @@ from core import agency as agency_mod  # noqa: E402
 from core import group_willingness as gw  # noqa: E402
 from core import schedule_preplan as preplan  # noqa: E402
 from core import script_engine as se  # noqa: E402
-from core.narrator import DEFAULT_STYLE_PROMPT, NarrativeResult, build_system_prompt  # noqa: E402
+from core.narrator import (  # noqa: E402
+    DEFAULT_STYLE_PROMPT,
+    NarrativeResult,
+    build_system_prompt,
+    phase_instruction,
+    transport_instruction,
+)
 from core.service import InterludeService, SessionView  # noqa: E402
 from core.share_sync import SHARE_SECTIONS  # noqa: E402
-from core.timeutil import story_local_time_context  # noqa: E402
+from core.timeutil import format_story_clock, story_local_time_context  # noqa: E402
 from core.turn_engine import TurnEngine, should_supersede_request  # noqa: E402
 from core.types import (  # noqa: E402
     DeliveryUnknown,
@@ -130,7 +137,7 @@ def test_script_engine() -> None:
     check("分段拆分", bubbles == ["一", "二", "三"], str(bubbles))
     newline = se.split_visible_reply_bubbles("甲\n\n乙", newline_as_separator=True)
     check("换行分段（小模型适配）", newline == ["甲", "乙"], str(newline))
-    runtime = {"messageSeparator": "<sep/>", "maxMessageCharacters": 2000, "splitReplyMessages": True,
+    runtime = {"messageSeparator": "<sep/>", "maxMessageCharacters": 1500, "splitReplyMessages": True,
                "minimumDelayedReplySeconds": 10, "maximumDelayedReplyMinutes": 1440}
     now = now_utc()
     immediate = se.normalize_interaction({"seen": True, "reply": {"mode": "immediate", "content": "在的"}}, now, runtime)
@@ -280,11 +287,11 @@ def build_config() -> dict:
             "typingJitterRatio": 0.3, "autoAdvanceEnabled": True, "autoAdvanceIntervalMinutes": 40,
             "autoAdvanceJitterMinutes": 5, "conversationFollowUpMinutes": [10, 20],
             "conversationFollowUpJitterMinutes": 1, "sweepIntervalMinutes": 5,
-            "contextEntryLimit": 35, "contextTimeWindowMinutes": 45, "memoryLimit": 20,
-            "maxMessageCharacters": 2000, "maxScriptCharacters": 8000,
+            "contextEntryLimit": 17, "contextTimeWindowMinutes": 6, "memoryLimit": 20,
+            "maxMessageCharacters": 1500, "maxScriptCharacters": 1400,
             "minimumDelayedReplySeconds": 10, "maximumDelayedReplyMinutes": 1440,
             "allowProactiveMessages": True, "proactiveWillingnessThreshold": 0.65,
-            "narrativeRetryMaxAttempts": 0,
+            "narrativeRetryDelaySeconds": 15, "narrativeRetryMaxAttempts": 0,
         },
         "memory": {"enabled": True, "sceneEntryThreshold": 16, "sceneCharacterThreshold": 10000},
         "alterSystem": {"enabled": True, "baseThreshold": 3},
@@ -316,6 +323,143 @@ async def test_rc56_alignment() -> None:
     check("显式文风覆盖默认", "自定义文风：冷静克制。" in overridden and DEFAULT_STYLE_PROMPT not in overridden, overridden[-200:])
     check("分享分区包含 weather", "weather" in SHARE_SECTIONS, str(SHARE_SECTIONS))
     check("分享分区 18 项", len(SHARE_SECTIONS) == 18, str(len(SHARE_SECTIONS)))
+
+
+async def test_rc57_alignment() -> None:
+    """rc57 对齐：默认值下调、投影压缩、单场景 Overlay 演化。"""
+    now = now_utc()
+    check("故事时钟 HH:mm", format_story_clock(datetime(2026, 10, 17, 8, 30, tzinfo=timezone.utc), "Asia/Shanghai") == "16:30", "")
+    check("空时区时钟为空", format_story_clock(now, "") == "", "")
+
+    # 组回合提示词：群发言与私聊通道分流（rc57）
+    group_transport = transport_instruction("user-message", True)
+    check("群回合保留 groupReply", "groupReply" in group_transport, group_transport[-300:])
+    check("群回合提示私聊 crossConversationActions", "crossConversationActions" in group_transport, group_transport[-300:])
+    check("群回合私聊知识说明", "private conversations" in phase_instruction("user-message", True), "")
+
+    # rc57 默认上限：script 1400 / 可见消息 1500
+    normalized = se.normalize_decision(
+        {
+            "script": "x" * 1800,
+            "interaction": {"seen": True, "reply": {"mode": "immediate", "content": "y" * 1800}},
+        },
+        now - timedelta(minutes=1),
+        now,
+        True,
+        {},
+        {},
+        "p1",
+        {"p1"},
+        set(),
+        phase="user-message",
+    )
+    check("rc57 剧本默认上限 1400", len(normalized["script"]) == 1400, str(len(normalized["script"])))
+    check(
+        "rc57 可见消息默认上限 1500",
+        len(normalized["interaction"]["reply"]["content"]) == 1500,
+        str(len(normalized["interaction"]["reply"]["content"])),
+    )
+
+    # rc57 投递现实投影：head 截断 + 回执时钟
+    entry = SimpleNamespace(
+        kind="script",
+        id=7,
+        metadata={
+            "commitId": "commit-1",
+            "deliveryActions": [{
+                "commitId": "commit-1",
+                "eventId": "event-1",
+                "eventKind": "outgoing-message",
+                "participantId": "p1",
+                "segments": [{
+                    "index": 0,
+                    "kind": "message",
+                    "content": "这是一条超过十二个字符的消息内容",
+                    "status": "pending",
+                    "attemptedAt": to_iso(now),
+                }],
+            }],
+        },
+    )
+    projected = se.delivery_reality_projection([entry], "p1", False, timezone_name="Asia/Shanghai")
+    segment = projected[0]["segments"][0]
+    check("rc57 投影 head 截断", segment["head"].endswith("…") and len(segment["head"]) == 13, str(segment))
+    check("rc57 投影不携带全文", "content" not in segment, str(segment))
+    check("rc57 投影回执时钟", segment.get("at") == format_story_clock(now, "Asia/Shanghai"), str(segment))
+    check("rc57 投影 eventKind", projected[0].get("eventKind") == "outgoing-message", str(projected))
+
+    # rc57 Issue #8：单场景、多独立回合也允许普通设定演化
+    tmp = tempfile.mkdtemp(prefix="hdsi-rc57-")
+    try:
+        service = InterludeService(
+            config_getter=lambda: build_config(),
+            data_dir=tmp,
+            logger=lambda level, message: None,
+            transport=StubTransport(),
+        )
+        session = SessionView(
+            platform="onebot", selfId="90001", userId="10001", channelId="onebot:FriendMessage:10001",
+            isDirect=True, content="在吗", senderName="小林", umo="onebot:FriendMessage:10001",
+        )
+        story = await service.create_story(session)
+        scene = await service.active_scene(story.id)
+        entry_ids = []
+        for offset in (2, 1, 0):
+            entry_ids.append(await service.append_entry(story.id, {
+                "kind": "script",
+                "actor": "protagonist",
+                "participantId": "",
+                "content": f"第 {offset} 天的独立回合",
+                "occurredAt": to_iso(now - timedelta(days=offset)),
+                "metadata": {"sceneId": scene.id if scene else None},
+            }, now))
+        patch_id = service.db.insert_row("interlude_state_patch", {
+            "storyId": story.id, "participantId": "", "target": "character",
+            "path": "characterTraits", "proposedValue": "更谨慎",
+            "evidence": "连续三个独立回合", "confidence": 0.9, "impact": "minor",
+            "status": "proposed", "sourceEntryIds": entry_ids,
+            "createdAt": now, "appliedAt": None,
+        })
+        await service._maintain_overlays(story, now)
+        applied = service.db.first_row("interlude_state_patch", {"id": patch_id})
+        check("rc57 单场景多回合可演化", applied is not None and applied.get("status") == "applied", str(applied))
+        fresh_story = await service.get_story(story.id)
+        traits = ((fresh_story.state or {}).get("settingOverlay") or {}).get("characterTraits") or []
+        check("rc57 演化写入 overlay", "更谨慎" in traits, str(traits))
+
+        single_id = await service.append_entry(story.id, {
+            "kind": "script",
+            "actor": "protagonist",
+            "participantId": "",
+            "content": "只有一个回合",
+            "occurredAt": to_iso(now),
+            "metadata": {"sceneId": scene.id if scene else None},
+        }, now)
+        patch_two = service.db.insert_row("interlude_state_patch", {
+            "storyId": story.id, "participantId": "", "target": "perspective",
+            "path": "outlook", "proposedValue": "更悲观",
+            "evidence": "只有一个回合", "confidence": 0.9, "impact": "minor",
+            "status": "proposed", "sourceEntryIds": [single_id],
+            "createdAt": now, "appliedAt": None,
+        })
+        await service._maintain_overlays(story, now)
+        blocked = service.db.first_row("interlude_state_patch", {"id": patch_two})
+        check("rc57 单回合不演化", blocked is not None and blocked.get("status") == "proposed", str(blocked))
+
+        # 重大变化仍要求两个独立场景：同一场景的 3 个回合不足以放行 major
+        patch_major = service.db.insert_row("interlude_state_patch", {
+            "storyId": story.id, "participantId": "", "target": "world",
+            "path": "era", "proposedValue": "时代改变",
+            "evidence": "同一场景的三个回合", "confidence": 0.99, "impact": "major",
+            "status": "proposed", "sourceEntryIds": entry_ids,
+            "createdAt": now, "appliedAt": None,
+        })
+        await service._maintain_overlays(story, now)
+        major_row = service.db.first_row("interlude_state_patch", {"id": patch_major})
+        check("rc57 单场景不放行 major", major_row is not None and major_row.get("status") == "proposed", str(major_row))
+        service.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 class UnknownTransport:
@@ -477,6 +621,7 @@ async def main() -> None:
     test_agency()
     await test_turn_engine()
     await test_rc56_alignment()
+    await test_rc57_alignment()
     await test_delivery_unknown()
     await test_service_end_to_end()
     print(f"\n通过 {PASSED} 项")

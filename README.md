@@ -4,35 +4,38 @@
 
 HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot 移植版本。
 上游为 Koishi 插件 [`koishi-plugin-hds-interlude`](https://gitee.com/MomoiCore/HDS-Interlude)（MomoiCore，AGPL-3.0，本移植基于其
-`1.0.1-rc56` 源码包）。装上以后，你的角色不再"收到一条消息就回一条"，而是**一直在过自己的日子**：
+`1.0.1-rc57` 源码包）。装上以后，你的角色不再"收到一条消息就回一条"，而是**一直在过自己的日子**：
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
-- 上游：Koishi 插件 `hds-interlude` `1.0.1-rc56`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.1.1`，AstrBot `>=4.16,<5`
+- 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.1.2`，AstrBot `>=4.16,<5`
 - 依赖：`httpx`（模型请求）；数据存储使用 Python 标准库 `sqlite3`（无需额外数据库服务）
 
 ---
 
-## 版本与本次更新（v0.1.1 / 上游 rc56）
+## 版本与本次更新（v0.1.2 / 上游 rc57）
 
-本版把移植基线从 `rc52` 提升到 `rc56`，只同步**影响行为与配置语义**的变更；
-rc55 / rc56 中仅针对 typ-0 桌面桥接（`desktop-bridge`、动作代理回执）的修复，
-在 AstrBot 侧没有对应通道，按"等价实现"落在通用投递链路上。
+本版把移植基线从 `rc56` 提升到 `rc57`，重点是**单场景长故事的 Overlay 演化修复**、
+**投递现实投影压缩**与**上下文/重试默认值下调**。rc57 中仅涉及 Koishi 部署向导、
+提示词合约自动裁剪（`specializationAutoTrim`）、cache-first 指针化与发布产物的改动不进入 AstrBot 侧。
 
 | 更新对象 | 范围 | 预期效果与行为 |
 | --- | --- | --- |
-| `core/narrator.py` `DEFAULT_STYLE_PROMPT` | 新增常量并作为 `build_system_prompt` 的空值兜底 | 未填写 `model.stylePrompt` 时，主叙事使用约 700 字的完整中文生活剧本写作指引（rc54 恢复的默认文风），不再是单句英文兜底；显式配置的文风与故事级 `style` 覆盖行为不变 |
-| `_conf_schema.json` `model.stylePrompt` | 默认值与描述 | 新安装/清空该字段后，配置页展示并实际使用同一份完整指引（与运行时单一常量对齐，避免双源漂移） |
-| `core/service.py` 投递链 | `_transport_send` 改为三态 `delivered / failed / unknown`；即时、分段、延迟、群聊四条路径统一分支 | 回执超时（`DeliveryUnknown`）时账本记 `pending` 并留 `transport-timeout:` 原因，**不再误记 `failed`、不再自动重发**；确定失败仍按原补偿重试。群消息条目附带 `metadata.deliveryStatus` |
-| `main.py` `PluginTransport.send` | 30 秒回执上限 + 超时/桥接关闭识别 | 平台调用悬挂不再无限阻塞回合；超时抛 `DeliveryUnknown`，其余异常仍返回 `False`（确定失败） |
-| `main.py` `_log` | 日志出口全包异常 | 日志后端故障不会中断写作回合（对应 rc55 的日志层防御） |
-| `core/service.py` `flush_buffered_narrative` | 批次取出与开场诊断移入 `try`，`end_flush` 置于 `finally` | 任何前段异常都能释放故事级 `narrating` 互斥并按未提交批次排重试，避免"后续消息只缓冲、永不写作"的回合死锁（rc55） |
-| `core/share_sync.py` `SHARE_SECTIONS` | 白名单增加 `weather`（17 → 18 项） | 含天气分区的分享码在 `interlude.preset.sync` 时不再被静默丢弃，与 typ0-site 白名单一致（rc56 唯一代码修复） |
-| 配置描述 | `mainResponseFormat`、`presetSync.sections`、`weather.skipFantasyWorld`、`runtime` 固定推进五参数、`urge`/`agency` 门槛 | 描述与代码行为一致：主叙事格式只有一个开关；Urge 开启后固定间隔参数不生效；架空世界默认仍注入真实天气 |
+| `core/service.py` 状态演化证据 | 新增 `narrative_turn_count` / `state_patch_evidence`；script 条目 metadata 增加 `sceneId` | 普通（minor）设定演化改按**独立叙事回合数**判断，不再把单个参与者误当成 1 个回合；单场景、长周期故事也能在累计 3 个回合、跨 2 天后渐进应用。重大（major）变化仍要求 2 个独立场景（rc57 Issue #8） |
+| `core/script_engine.py` 投递现实投影 | 消息片段只保留 12 个码点的 `head`，附带回执时钟 `at`、`eventKind`、`index`；默认按 2000 字符预算从新到旧裁剪 | 未确认送达的动作仍会进入下一轮提示词，但不再把整段正文重复塞进上下文；模型能看到"什么时候尝试过"，上下文更小、更接近事实 |
+| `core/timeutil.py` | 新增 `format_story_clock`（故事本地 HH:mm） | 回执时间按故事时区展示，跨时区不混淆 |
+| `_conf_schema.json` 默认值 | `contextEntryLimit 35→17`、`contextTimeWindowMinutes 45→6`、`maxScriptCharacters 8000→1400`、`maxMessageCharacters 2000→1500`、`narrativeRetryDelaySeconds 60→15`、`forwardMessage.maxCharacters 8000→2000` | 新安装/未显式配置的实例上下文更小、失败恢复更快；已显式写入旧值的配置完全不受影响 |
+| `core/narrator.py` 群回合提示词 | 群回合补充"私聊通道"说明：私聊内容经 `crossConversationActions` 发出，`groupReply` 只负责群发言 | 群回合里出现"该私下回复某人"的情节时，模型不会再把它误写成群消息 |
+| `_conf_schema.json` 配置面 | `presetSync` 移至第一组并改为【预设入口】；weather/longHorizon/qzone/维护区重新编号；修正 chatActions/browser/timelineDirector/urge 的"保留项"描述 | 配置页与上游 rc57 顺序一致；用户不会再按失真的描述以为表情包/浏览器/时间导演已生效 |
 
-不适用于本移植的 rc56 条目：贴纸/原生表情的 `ambiguous → pending`（本移植未接入动作投递）、
-表情包 HTTP 回源路由的 realpath 加固（无本地回源路由）、桌面桥接 `unknown` 回执（无 typ-0 通道）。
-这些能力若后续接入，需复用同一套 `DeliveryUnknown → pending` 语义。
+不适用于本移植的 rc57 条目：`specializationAutoTrim` 合约自动裁剪（本移植提示词本就是子集，
+未暴露该开关）、`recentExchange` 指针化（本移植未启用 cache-first 载荷）、
+`clearDatabase` 的端点/别名清理（本移植 `clear_all_tables` 已覆盖全部 21 张表）。
+另：附带的 Koishi 一键部署向导 HTML 仍把 `contextEntryLimit/contextTimeWindowMinutes`
+写成 35/45，与 rc57 插件 schema 默认的 17/6 不一致；AstrBot 部署不读取该向导，请以插件配置为准。
+
+上一版 v0.1.1 / rc56 已包含：rc54 完整默认文风、rc56 weather 分享分区、投递三态
+`delivered/failed/unknown`、rc55 回合收尾加固。
 
 ---
 
@@ -263,7 +266,7 @@ interlude.status        /interlude.status        interlude status
 
 | 上游子系统（src/） | 本移植对应 | 状态 |
 | --- | --- | --- |
-| `service.ts` 编排（回合 / 排队 / 投递） | `core/service.py` | 完整（核心闭环；投递三态 `delivered/failed/unknown`） |
+| `service.ts` 编排（回合 / 排队 / 投递） | `core/service.py` | 完整（核心闭环；投递三态 `delivered/failed/unknown`；rc57 状态演化按叙事回合取证） |
 | `turn-engine.ts` 短时合并与请求取代 | `core/turn_engine.py` | 完整（rc55 回合收尾加固：`end_flush` 必达） |
 | `scheduler.ts` 调度状态机 | `core/scheduler.py` | 完整 |
 | `time.ts` 时间锚 | `core/timeutil.py` | 完整 |
@@ -274,6 +277,8 @@ interlude.status        /interlude.status        interlude status
 | `database.ts` 21 张表 | `core/database.py` | 完整 |
 | `narrator.ts` 模型请求与提示词 | `core/narrator.py` | 简化（见下方"提示词"说明） |
 | `script/*` 提交 / 账本 / 标记解析 | `core/script_engine.py` | 简化（say 标记、提交、账本、投递现实完整；SceneFrame/DialogueBurst 未迁移） |
+| `script/delivery-reality.ts` 投递现实投影 | `core/script_engine.py` `delivery_reality_projection` | 完整（rc57：12 码点 head、回执时钟、字符预算） |
+| `script/development.ts` 状态演化证据 | `core/service.py` `state_patch_evidence` | 简化（回合/跨日/场景证据；未实现 development 候选累积） |
 | `forward-message.ts` 合并转发读取 | 预留（需 aiocqhttp 平台层调用 `get_forward_msg`） | 未迁移 |
 | `share-sync.ts` 分享码同步 | `core/share_sync.py` | 简化（分区差异预览为字段级；18 个分区含 `weather`） |
 | `endpoints.ts` 端点注册表 | `service.py` 端点子集 + 表 | 简化 |
@@ -345,14 +350,14 @@ interlude.status        /interlude.status        interlude status
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 67 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/服务端到端
-python tests/plugin_harness_test.py  # 入口层 25 项：命令派发/确认流/消息中间件/失明模式/回执超时（AstrBot 桩）
+python tests/smoke_test.py           # 核心层 82 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
+python tests/plugin_harness_test.py  # 入口层 31 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面（AstrBot 桩）
 ```
 
 ## 11. 许可与致谢
 
 - 本移植基于 **MomoiCore 的 HDS Interlude**（Koishi 插件，AGPL-3.0）制作：
-  上游仓库 <https://gitee.com/MomoiCore/HDS-Interlude>，本移植基于其 `1.0.1-rc56` 源码包。
+  上游仓库 <https://gitee.com/MomoiCore/HDS-Interlude>，本移植基于其 `1.0.1-rc57` 源码包。
 - 本插件同样以 **AGPL-3.0** 发布（见 `LICENSE`）。移植过程遵循上游许可：保留版权与许可声明、公开完整源码。
 - 框架层映射部分参考了 AstrBot 官方插件文档与社区中同类移植项目的公开实现思路；
   命令语义、数据协议、阈值与算法参数均以上游源码为准逐项核对。

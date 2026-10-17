@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from .types import DEFAULT_MESSAGE_SEPARATOR, ensure_utc, to_iso
+from .timeutil import format_story_clock
 
 
 def clip(value: Any, limit: int) -> str:
@@ -231,7 +232,7 @@ def normalize_interaction(value: Any, now: datetime, runtime: Dict[str, Any]) ->
     content = None
     if isinstance(reply.get("content"), str):
         content = sanitize_and_clamp_visible_content(
-            reply["content"], int(runtime.get("maxMessageCharacters") or 2000), separator
+            reply["content"], int(runtime.get("maxMessageCharacters") or 1500), separator
         )
     if content and runtime.get("splitReplyMessages") is not False and separator and separator not in content:
         content = re.sub(r"\s*\r?\n\s*\r?\n+", separator, content)
@@ -407,7 +408,7 @@ def normalize_conversation_action(
     if group_target and value.get("mode") != "immediate":
         return None
     content = (
-        sanitize_and_clamp_visible_content(value.get("content"), int(runtime.get("maxMessageCharacters") or 2000), runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR)
+        sanitize_and_clamp_visible_content(value.get("content"), int(runtime.get("maxMessageCharacters") or 1500), runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR)
         if isinstance(value.get("content"), str)
         else ""
     )
@@ -456,7 +457,7 @@ def dropped_proactive_action_info(
     if not isinstance(value.get("content"), str) or not value["content"].strip():
         return None
     content = sanitize_and_clamp_visible_content(
-        value["content"], int(runtime.get("maxMessageCharacters") or 2000), runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR
+        value["content"], int(runtime.get("maxMessageCharacters") or 1500), runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR
     )
     if not content:
         return None
@@ -507,7 +508,7 @@ def normalize_decision(
     memory_config = memory_config or {}
     permitted_participants = set(permitted_participant_ids)
     raw = reconcile_transport_references(raw, runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR)
-    script = normalize_script_field(raw.get("script")).strip()[: int(runtime.get("maxScriptCharacters") or 8000)]
+    script = normalize_script_field(raw.get("script")).strip()[: int(runtime.get("maxScriptCharacters") or 1400)]
     interaction = None if phase == "advance" else normalize_interaction(raw.get("interaction"), now, runtime)
     memories: List[Dict[str, Any]] = []
     if isinstance(raw.get("memories"), list):
@@ -1028,11 +1029,34 @@ def platform_action_reference(
 # --------------------------------------------------------------------------- #
 
 
+def _message_head(content: str, limit: int = 12) -> str:
+    """消息类片段只保留开头（对应 rc57 `messageHead`，按 Unicode 码点计）。"""
+    points = list(content)
+    if len(points) <= limit:
+        return content
+    return "".join(points[:limit]) + "…"
+
+
+def _receipt_clock(segment: Dict[str, Any], timezone_name: str) -> str:
+    """投递回执时间 HH:mm（优先 completedAt，其次 attemptedAt）。"""
+    moment = ensure_utc(segment.get("completedAt")) or ensure_utc(segment.get("attemptedAt"))
+    return format_story_clock(moment, timezone_name) if moment else ""
+
+
 def delivery_reality_projection(
-    entries: Sequence[Any], participant_id: str, share_participant_details: bool = False, limit: int = 8
+    entries: Sequence[Any],
+    participant_id: str,
+    share_participant_details: bool = False,
+    limit: int = 8,
+    character_budget: int = 2000,
+    timezone_name: str = "",
 ) -> List[Dict[str, Any]]:
-    """投影未确认送达的可见动作（对应 deliveryReality）。"""
-    results: List[Dict[str, Any]] = []
+    """投影未确认送达的可见动作（对应 rc57 `deliveryReality`）。
+
+    rc57 起：消息片段只保留 12 个码点的 `head`，附带回执时钟 `at`、
+    `eventKind` 与 `index`，并按字符预算（默认 2000）从新到旧裁剪。
+    """
+    projected: List[Dict[str, Any]] = []
     for entry in entries:
         kind = getattr(entry, "kind", None)
         metadata = getattr(entry, "metadata", None) or {}
@@ -1043,7 +1067,12 @@ def delivery_reality_projection(
         if not isinstance(actions, list):
             continue
         if not actions and metadata.get("commitId"):
-            results.append({"sourceEntryId": entry_id, "eventId": "", "segments": [], "communicationOutcome": "no-outgoing-action-recorded"})
+            projected.append({
+                "sourceEntryId": entry_id,
+                "eventId": "",
+                "segments": [],
+                "communicationOutcome": "no-outgoing-action-recorded",
+            })
             continue
         for action in actions:
             if not isinstance(action, dict):
@@ -1061,23 +1090,37 @@ def delivery_reality_projection(
             ]
             if not segments or not any(item.get("status") != "delivered" for item in segments):
                 continue
-            results.append({
+            view_segments = []
+            for position, item in enumerate(segments):
+                segment_kind = str(item.get("kind") or "message")
+                at = _receipt_clock(item, timezone_name)
+                view_segments.append({
+                    "index": item.get("index") if isinstance(item.get("index"), int) else position,
+                    "kind": segment_kind,
+                    "head": _message_head(item["content"]) if segment_kind == "message" else item["content"],
+                    "outcome": (
+                        "not-confirmed" if item.get("status") == "pending"
+                        else "delivery-not-confirmed-after-error" if item.get("status") == "failed"
+                        else item.get("status")
+                    ),
+                    **({"at": at} if at else {}),
+                })
+            projected.append({
                 "sourceEntryId": entry_id,
                 "eventId": action.get("eventId"),
-                "segments": [
-                    {
-                        "kind": item.get("kind"),
-                        "content": item.get("content"),
-                        "outcome": (
-                            "not-confirmed" if item.get("status") == "pending"
-                            else "delivery-not-confirmed-after-error" if item.get("status") == "failed"
-                            else item.get("status")
-                        ),
-                    }
-                    for item in segments
-                ],
+                "eventKind": action.get("eventKind") if isinstance(action.get("eventKind"), str) else "outgoing-message",
+                "segments": view_segments,
             })
-    return results[-limit:]
+    limited = projected[-max(1, int(limit)):]
+    kept: List[Dict[str, Any]] = []
+    remaining = max(200, int(character_budget))
+    for item in reversed(limited):
+        size = len(json.dumps(item, ensure_ascii=False))
+        if kept and size > remaining:
+            break
+        kept.insert(0, item)
+        remaining -= size
+    return kept
 
 
 def continuation_bookmark(entries: Sequence[Any], from_at: datetime, now: datetime) -> Dict[str, Any]:

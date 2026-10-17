@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
@@ -244,6 +245,16 @@ async def main() -> None:
         finally:
             plugin_main.astrbot_logger.info = original_info  # type: ignore[assignment]
         check("日志失败不抛出", log_safe, "")
+
+        # 13) rc57 配置面：预设入口置顶 + 默认预算下调
+        schema = json.load(open(os.path.join(BASE, "_conf_schema.json"), encoding="utf-8"))
+        check("rc57 预设同步置顶", next(iter(schema)) == "presetSync", str(list(schema)[:3]))
+        runtime = schema["runtime"]["items"]
+        check("rc57 上下文默认 17 条", runtime["contextEntryLimit"]["default"] == 17, str(runtime["contextEntryLimit"]))
+        check("rc57 时间窗默认 6 分钟", runtime["contextTimeWindowMinutes"]["default"] == 6, str(runtime["contextTimeWindowMinutes"]))
+        check("rc57 剧本默认 1400", runtime["maxScriptCharacters"]["default"] == 1400, str(runtime["maxScriptCharacters"]))
+        check("rc57 消息默认 1500", runtime["maxMessageCharacters"]["default"] == 1500, str(runtime["maxMessageCharacters"]))
+        check("rc57 重试默认 15 秒", runtime["narrativeRetryDelaySeconds"]["default"] == 15, str(runtime["narrativeRetryDelaySeconds"]))
     finally:
         await plugin.terminate()
 

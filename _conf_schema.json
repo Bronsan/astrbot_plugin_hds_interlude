@@ -1,4 +1,40 @@
 {
+  "presetSync": {
+    "description": "【预设入口】从 typ0.space 直接拉取角色人设/配置；默认关闭。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用预设同步，需填写分享码。",
+        "type": "bool",
+        "default": false
+      },
+      "baseUrl": {
+        "description": "分享站地址。",
+        "type": "string",
+        "default": "https://typ0.space"
+      },
+      "shareCode": {
+        "description": "8 位分享码（大小写均可，可带连字符）。",
+        "type": "string",
+        "default": ""
+      },
+      "autoUpdate": {
+        "description": "重载时检查远端 revision，有新版本才应用。",
+        "type": "bool",
+        "default": false
+      },
+      "sections": {
+        "description": "要同步的分区（留空 = 预设里有什么就同步什么）。可选：storyDefaults（配合“应用到当前故事”）、runtime、urge、agency、memory、alterSystem、schedulePreplan、timelineDirector、chatActions、stickers、sharedStory、browser、worldSeeder、weather、longHorizon、qzone、blindMode、logging。",
+        "type": "list",
+        "default": []
+      },
+      "applyToCurrentStory": {
+        "description": "同时把 storyDefaults 应用到当前运行中的故事。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
   "storyDefaults": {
     "description": "【必填 1】故事档案：主角、世界、默认关系、地点、时区与叙事风格。只在新故事创建时写入 Canon。",
     "type": "object",
@@ -479,7 +515,7 @@
       "narrativeRetryDelaySeconds": {
         "description": "叙事失败后自动重试前等待秒数。",
         "type": "int",
-        "default": 60
+        "default": 15
       },
       "narrativeRetryMaxAttempts": {
         "description": "单次用户回合可自动重试的最多次数；0 关闭。",
@@ -514,12 +550,12 @@
       "contextEntryLimit": {
         "description": "写入主叙事上下文的近期原始条目数。",
         "type": "int",
-        "default": 35
+        "default": 17
       },
       "contextTimeWindowMinutes": {
         "description": "额外并入最近多少分钟内的全部条目；0 关闭。",
         "type": "int",
-        "default": 45
+        "default": 6
       },
       "memoryLimit": {
         "description": "主叙事携带的长期事实数量。",
@@ -529,12 +565,12 @@
       "maxScriptCharacters": {
         "description": "单次写作允许追加的剧本文本上限。",
         "type": "int",
-        "default": 8000
+        "default": 1400
       },
       "maxMessageCharacters": {
         "description": "单条可见消息的最大字符数。",
         "type": "int",
-        "default": 2000
+        "default": 1500
       },
       "minimumDelayedReplySeconds": {
         "description": "模型允许设置的最短延迟（秒）。",
@@ -606,7 +642,7 @@
           "maxCharacters": {
             "description": "注入当前事件的最大字符数。",
             "type": "int",
-            "default": 8000
+            "default": 2000
           },
           "maxDepth": {
             "description": "嵌套合并转发最大展开层数。",
@@ -618,7 +654,7 @@
     }
   },
   "urge": {
-    "description": "【节奏 6】Urge 弹性推进（保留项：开启后替代固定间隔调度；首版移植沿用固定间隔，见 README）。",
+    "description": "【节奏 6】Urge 弹性推进（保留项：本移植沿用固定间隔调度，尚未接入 Urge 算法）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -691,7 +727,7 @@
     }
   },
   "timelineDirector": {
-    "description": "【节奏 8】时间导演：自动回合先生成相对时间账本。",
+    "description": "【节奏 8】时间导演（保留项：本移植已实现 narrator.plan_timeline，但尚未接线到自动回合）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -753,7 +789,7 @@
     }
   },
   "chatActions": {
-    "description": "【表达 10】聊天动作：引用、反应与 QQ 原生表情（保留项：表情投递依赖平台连接器，首版支持原生表情发送）。",
+    "description": "【表达 10】聊天动作：引用、反应与 QQ 原生表情（保留项：解析与账本已就绪，投递未接入）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -794,7 +830,7 @@
     }
   },
   "stickers": {
-    "description": "【表达 11】本地表情包（保留项：素材目录扫描与描述模型在首版为简化实现）。",
+    "description": "【表达 11】本地表情包（保留项：本移植未接入素材扫描、描述与发送）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1072,7 +1108,7 @@
     }
   },
   "browser": {
-    "description": "【扩展 14】网页观察（首版移植为 httpx 抓取，见 README 移植对照表；默认关闭）。",
+    "description": "【扩展 14】网页观察（本移植未接入；配置保留，默认关闭）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1177,111 +1213,8 @@
       }
     }
   },
-  "longHorizon": {
-    "description": "【扩展 16】长线叙事指导（实验，保留项：首版未移植，见 README）。",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "总开关（首版保留配置，行为未接入）。",
-        "type": "bool",
-        "default": false
-      },
-      "triggerScore": {
-        "description": "首次生成加权分数门槛。",
-        "type": "int",
-        "default": 25
-      },
-      "reviewIncrement": {
-        "description": "复审所需再积累分数。",
-        "type": "int",
-        "default": 40
-      },
-      "intensity": {
-        "description": "指导强度。",
-        "type": "string",
-        "options": [
-          "subtle",
-          "moderate",
-          "strong"
-        ],
-        "default": "subtle"
-      }
-    }
-  },
-  "qzone": {
-    "description": "【扩展 17】QQ 空间通道（保留项：需要 SnowLuma 兼容连接，AstrBot 平台层默认不可用）。",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用 QQ 空间通道。",
-        "type": "bool",
-        "default": false
-      },
-      "dailyPostCap": {
-        "description": "每日发帖上限（0=禁止）。",
-        "type": "int",
-        "default": 3
-      },
-      "dailyCommentCap": {
-        "description": "每日评论上限（0=禁止）。",
-        "type": "int",
-        "default": 6
-      },
-      "dailyLikeCap": {
-        "description": "每日点赞上限（0=禁止）。",
-        "type": "int",
-        "default": 12
-      },
-      "minIntervalMinutes": {
-        "description": "任意两次空间动作最小间隔（分钟）。",
-        "type": "int",
-        "default": 90
-      },
-      "feedWindowMinutes": {
-        "description": "好友动态轮询消费窗（分钟）。",
-        "type": "int",
-        "default": 120
-      }
-    }
-  },
-  "presetSync": {
-    "description": "【扩展 18】预设同步：从分享站拉取并应用配置（默认关闭）。",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用预设同步，需填写分享码。",
-        "type": "bool",
-        "default": false
-      },
-      "baseUrl": {
-        "description": "分享站地址。",
-        "type": "string",
-        "default": "https://typ0.space"
-      },
-      "shareCode": {
-        "description": "8 位分享码（大小写均可，可带连字符）。",
-        "type": "string",
-        "default": ""
-      },
-      "autoUpdate": {
-        "description": "重载时检查远端 revision，有新版本才应用。",
-        "type": "bool",
-        "default": false
-      },
-      "sections": {
-        "description": "要同步的分区（留空 = 预设里有什么就同步什么）。可选：storyDefaults（配合“应用到当前故事”）、runtime、urge、agency、memory、alterSystem、schedulePreplan、timelineDirector、chatActions、stickers、sharedStory、browser、worldSeeder、weather、longHorizon、qzone、blindMode、logging。",
-        "type": "list",
-        "default": []
-      },
-      "applyToCurrentStory": {
-        "description": "同时把 storyDefaults 应用到当前运行中的故事。",
-        "type": "bool",
-        "default": false
-      }
-    }
-  },
   "weather": {
-    "description": "【扩展 19】运行时天气：Open-Meteo 真实天气 → [世界事件] 注入（默认关闭）。",
+    "description": "【扩展 16】运行时天气：Open-Meteo 真实天气 → [世界事件] 注入（默认关闭）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1316,8 +1249,75 @@
       }
     }
   },
+  "longHorizon": {
+    "description": "【扩展 17】长线叙事指导（实验，保留项：本移植未迁移，见 README）。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "总开关（首版保留配置，行为未接入）。",
+        "type": "bool",
+        "default": false
+      },
+      "triggerScore": {
+        "description": "首次生成加权分数门槛。",
+        "type": "int",
+        "default": 25
+      },
+      "reviewIncrement": {
+        "description": "复审所需再积累分数。",
+        "type": "int",
+        "default": 40
+      },
+      "intensity": {
+        "description": "指导强度。",
+        "type": "string",
+        "options": [
+          "subtle",
+          "moderate",
+          "strong"
+        ],
+        "default": "subtle"
+      }
+    }
+  },
+  "qzone": {
+    "description": "【扩展 18】QQ 空间通道（保留项：需要 SnowLuma 兼容连接，AstrBot 平台层默认不可用）。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 QQ 空间通道。",
+        "type": "bool",
+        "default": false
+      },
+      "dailyPostCap": {
+        "description": "每日发帖上限（0=禁止）。",
+        "type": "int",
+        "default": 3
+      },
+      "dailyCommentCap": {
+        "description": "每日评论上限（0=禁止）。",
+        "type": "int",
+        "default": 6
+      },
+      "dailyLikeCap": {
+        "description": "每日点赞上限（0=禁止）。",
+        "type": "int",
+        "default": 12
+      },
+      "minIntervalMinutes": {
+        "description": "任意两次空间动作最小间隔（分钟）。",
+        "type": "int",
+        "default": 90
+      },
+      "feedWindowMinutes": {
+        "description": "好友动态轮询消费窗（分钟）。",
+        "type": "int",
+        "default": 120
+      }
+    }
+  },
   "blindMode": {
-    "description": "【维护 20】盲区模式：沉浸运行，命令静默与最小健康心跳。",
+    "description": "【维护 19】盲区模式：沉浸运行，命令静默与最小健康心跳。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1333,7 +1333,7 @@
     }
   },
   "logging": {
-    "description": "【维护 21】日志：级别与隐私预览（AstrBot 日志接管实际输出）。",
+    "description": "【维护 20】日志：级别与隐私预览（AstrBot 日志接管实际输出）。",
     "type": "object",
     "items": {
       "level": {

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-#: 可同步的配置分区（对应 rc56 SHARE_SECTIONS，18 项；weather 与站点白名单对齐）。
+#: 可同步的配置分区（对应 rc56 起的 SHARE_SECTIONS，18 项；weather 与站点白名单对齐）。
 SHARE_SECTIONS = (
     "storyDefaults", "runtime", "urge", "agency", "memory", "alterSystem",
     "schedulePreplan", "timelineDirector", "chatActions", "stickers", "sharedStory",

@@ -429,7 +429,9 @@ def phase_instruction(phase: str, group_turn: bool = False) -> str:
             "her present circumstances, attention and willingness.",
             (
                 "When the protagonist actually posts to the group by now, let its exact words occur naturally at that "
-                "posting action in script."
+                "posting action in script. recentScript entries from her private conversations are also part of her "
+                "knowledge; when the moment calls for something meant for one person, carry it through "
+                "crossConversationActions instead of the group post."
                 if group_turn
                 else "When the protagonist actually sends a private reply by now, let its exact words occur naturally at "
                 "that sending action in script. The path to that action comes from her present attention, habits and "
@@ -480,7 +482,11 @@ def transport_instruction(phase: str, group_turn: bool = False) -> str:
         return (
             f"{authority}\nFor this group turn, return groupReply as "
             '{"mode":"immediate","content":"the exact words posted to the group now"}. The content must be exactly the '
-            "words posted in the script. Use mode=none when no group post occurs."
+            "words posted in the script. Use mode=none when no group post occurs. "
+            "This turn also carries her private channel: when something belongs with one person — answering a pending "
+            "private message, continuing a private thread, sharing something meant for them alone — send it through "
+            "crossConversationActions with that participant's exact id from participants; groupReply stays for the "
+            "group post."
         )
     if phase == "advance":
         return (
@@ -1274,8 +1280,8 @@ def _runtime_view(config: Dict[str, Any]) -> Dict[str, Any]:
     """取出服务层使用的 runtime 字段子集（供 normalize_decision 使用）。"""
     runtime = dict(config.get("runtime") or {})
     runtime.setdefault("messageSeparator", DEFAULT_MESSAGE_SEPARATOR)
-    runtime.setdefault("maxMessageCharacters", 2000)
-    runtime.setdefault("maxScriptCharacters", 8000)
+    runtime.setdefault("maxMessageCharacters", 1500)
+    runtime.setdefault("maxScriptCharacters", 1400)
     runtime.setdefault("minimumDelayedReplySeconds", 10)
     runtime.setdefault("maximumDelayedReplyMinutes", 1440)
     runtime.setdefault("splitReplyMessages", True)

@@ -105,6 +105,16 @@ def format_story_display_time(value: Optional[datetime], timezone_name: str) -> 
     return f"{context['local']} {context['offset'] or 'GMT+0'}"
 
 
+def format_story_clock(value: Optional[datetime], timezone_name: str) -> str:
+    """故事本地时钟 HH:mm（对应 rc57 `formatStoryClock`）；无时区时返回空串。"""
+    if value is None or not str(timezone_name or "").strip():
+        return ""
+    zone = resolve_timezone(timezone_name)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(zone).strftime("%H:%M")
+
+
 def local_clock_minutes(value: datetime, timezone_name: str) -> int:
     """故事本地时间的分钟数（0..1439），对应 `localClockMinutes`。"""
     zone = resolve_timezone(timezone_name)
