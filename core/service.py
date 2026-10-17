@@ -61,6 +61,7 @@ from .turn_engine import TurnEngine, format_buffered_user_messages
 from .types import (
     DEFAULT_MESSAGE_SEPARATOR,
     Arc,
+    DeliveryUnknown,
     Fact,
     Intent,
     Memory,
@@ -1056,8 +1057,15 @@ class InterludeService:
             self.db.update_rows("interlude_story", {"id": story_id}, {"cursorAt": now, "updatedAt": now_utc()})
             if decision.get("groupReply"):
                 umo = turn.get("umo") or ""
+                group_id = turn.get("groupId") or ""
+                delivery_status = "failed"
                 if umo:
-                    await self._transport_send(umo, decision["groupReply"])
+                    delivery_status = await self._transport_send(umo, decision["groupReply"])
+                if delivery_status == "unknown":
+                    # 群消息同样区分“结果未知”：可能已发出，只留痕、不重发。
+                    self._log("warn", f"群消息投递超时（结果未知，不自动重试） 群频道={group_id}")
+                elif delivery_status == "failed":
+                    self._log("error", f"群消息投递失败 群频道={group_id}")
                 self._group_willingness_memory[f"group-cooldown:{turn.get('groupId')}"] = {"at": time.time()}
                 # 成功群发言扣减意愿（同时生成静默批次）
                 gate_state_key = f"group-willingness:{turn.get('groupId')}"
@@ -1075,7 +1083,7 @@ class InterludeService:
                     "actor": "protagonist",
                     "content": decision["groupReply"],
                     "occurredAt": to_iso(now),
-                    "metadata": {"groupId": turn.get("groupId")},
+                    "metadata": {"groupId": turn.get("groupId"), "deliveryStatus": delivery_status},
                 }, now))
             self._schedule_next_automatic_advance(story_id, now)
 
@@ -1101,12 +1109,18 @@ class InterludeService:
             return
         request_id = revision
         turn.inFlightRequestId = request_id
-        batch = list(turn.messages)
-        turn.messages.clear()
-        if not batch:
-            self.turn_engine.end_flush(key, request_id)
-            return
         try:
+            # 批次取出与开场诊断都放在 try 内：任何前段异常都由 catch 消化，
+            # finally 的 end_flush 必达（对应上游 rc55 的回合死锁修复）。
+            batch = list(turn.messages)
+            turn.messages.clear()
+            self._log(
+                "debug",
+                f"写请求开始 故事={turn.storyId} 参与者={turn.participantId} "
+                f"请求={request_id} 批次={len(batch)}",
+            )
+            if not batch:
+                return
             snapshot = await self.serial(turn.storyId, lambda: self._turn_snapshot(turn.storyId, turn.participantId))
             if snapshot is None:
                 await self.schedule_narrative_retry(turn.storyId, turn.participantId)
@@ -1177,7 +1191,10 @@ class InterludeService:
             self._log("warn", f"合并写作任务失败：参与者={turn.participantId} 错误={error}")
             await self.schedule_narrative_retry(turn.storyId, turn.participantId)
         finally:
-            self.turn_engine.end_flush(key, request_id)
+            try:
+                self.turn_engine.end_flush(key, request_id)
+            except Exception as error:  # noqa: BLE001 - 收尾异常不得再抛出
+                self._log("warn", f"回合收尾失败：{error}")
 
     async def _turn_snapshot(
         self, story_id: str, participant_id: str
@@ -1711,13 +1728,18 @@ class InterludeService:
                     if hold > 0:
                         await asyncio.sleep(hold / 1000.0)
                 first_bubble = False
-                ok = await self._transport_send(target.channelId, bubble)
+                outcome = await self._transport_send(target.channelId, bubble)
                 reference = dict(message.get("scriptEvent") or {})
                 if reference:
                     reference["segmentIndex"] = index
-                if ok:
+                if outcome == "delivered":
                     delivered.append({"participantId": target.id, "content": bubble})
                     await self._mark_segment_delivered(story.id, reference, "delivered", "delivery-ok")
+                elif outcome == "unknown":
+                    # 回执超时：消息可能已送达，只记 pending，不排补偿（避免重复发送）。
+                    await self._mark_segment_delivered(
+                        story.id, reference, "pending", "transport-timeout: 回执超时，结果未知"
+                    )
                 else:
                     await self._mark_segment_delivered(story.id, reference, "failed", "transport-error")
                     await self._schedule_narrative_delivery_retry(story, target, bubble)
@@ -1746,15 +1768,24 @@ class InterludeService:
             self.db.update_rows("interlude_participant", {"id": fresh.id}, {"state": state, "updatedAt": now_utc()})
         return delivered
 
-    async def _transport_send(self, umo: str, text: str) -> bool:
-        """经平台层发送一条文本消息；失败返回 False（不抛出）。"""
+    async def _transport_send(self, umo: str, text: str) -> str:
+        """经平台层发送一条文本消息，返回投递状态。
+
+        返回 `"delivered"` / `"failed"` / `"unknown"`：
+        - `unknown` 表示请求已写出但回执超时（`DeliveryUnknown`）——消息可能
+          已经到达，账本必须记 `pending`，且不得自动重试（对应上游 rc53/rc56）；
+        - 其余异常一律按确定失败处理，允许补偿重试。
+        """
         if not umo or not text:
-            return False
+            return "failed"
         try:
-            return bool(await self._transport.send(umo, text))
+            return "delivered" if bool(await self._transport.send(umo, text)) else "failed"
+        except DeliveryUnknown as error:
+            self._log("warn", f"消息投递结果未知（可能已送达，不自动重试）：{error.reason}")
+            return "unknown"
         except Exception as error:  # noqa: BLE001 - 投递失败按账本记录，不能影响回合
             self._log("warn", f"消息投递失败：{error}")
-            return False
+            return "failed"
 
     async def _mark_segment_delivered(
         self, story_id: str, reference: Dict[str, Any], status: str, reason: str = ""
@@ -2102,15 +2133,31 @@ class InterludeService:
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
                 content = clip(payload.get("content"), int(self.runtime.get("maxMessageCharacters") or 2000))
                 if participant and content:
-                    ok = await self._transport_send(participant.channelId, content)
+                    outcome = await self._transport_send(participant.channelId, content)
                     reference = payload.get("scriptEvent") or {}
-                    await self._mark_segment_delivered(story.id, reference, "delivered" if ok else "failed", "split-due")
-                    self.db.update_rows(
-                        "interlude_intent", {"id": intent.id, "status": "pending"},
-                        {"status": "completed" if ok else "pending", "updatedAt": now},
+                    await self._mark_segment_delivered(
+                        story.id,
+                        reference,
+                        "delivered" if outcome == "delivered" else ("pending" if outcome == "unknown" else "failed"),
+                        "split-due" if outcome != "unknown" else "transport-timeout: 回执超时，结果未知",
                     )
-                    if not ok:
-                        self.db.update_rows("interlude_intent", {"id": intent.id}, {"notBefore": now + timedelta(seconds=30)})
+                    if outcome == "unknown":
+                        # 结果未知：不自动重发（可能已送达），意图就地收口并留痕。
+                        self.db.update_rows(
+                            "interlude_intent", {"id": intent.id, "status": "pending"},
+                            {
+                                "status": "completed",
+                                "payload": {**payload, "deliveryUnknown": True},
+                                "updatedAt": now,
+                            },
+                        )
+                    else:
+                        self.db.update_rows(
+                            "interlude_intent", {"id": intent.id, "status": "pending"},
+                            {"status": "completed" if outcome == "delivered" else "pending", "updatedAt": now},
+                        )
+                        if outcome == "failed":
+                            self.db.update_rows("interlude_intent", {"id": intent.id}, {"notBefore": now + timedelta(seconds=30)})
                     handled += 1
                 else:
                     self.db.update_rows("interlude_intent", {"id": intent.id, "status": "pending"}, {"status": "cancelled", "updatedAt": now})
@@ -2120,16 +2167,32 @@ class InterludeService:
                 participant = await self.get_participant(intent.participantId) if intent.participantId else None
                 content = clip((intent.payload or {}).get("content"), int(self.runtime.get("maxMessageCharacters") or 2000))
                 if participant and participant.status == "active" and content:
-                    ok = await self._transport_send(participant.channelId, content)
+                    outcome = await self._transport_send(participant.channelId, content)
                     reference = (intent.payload or {}).get("scriptEvent") or {}
                     if reference:
-                        await self._mark_segment_delivered(story.id, reference, "delivered" if ok else "failed", "delayed-due")
-                    self.db.update_rows(
-                        "interlude_intent", {"id": intent.id, "status": "pending"},
-                        {"status": "completed" if ok else "pending", "updatedAt": now},
-                    )
-                    if not ok:
-                        self.db.update_rows("interlude_intent", {"id": intent.id}, {"notBefore": now + timedelta(seconds=30)})
+                        await self._mark_segment_delivered(
+                            story.id,
+                            reference,
+                            "delivered" if outcome == "delivered" else ("pending" if outcome == "unknown" else "failed"),
+                            "delayed-due" if outcome != "unknown" else "transport-timeout: 回执超时，结果未知",
+                        )
+                    if outcome == "unknown":
+                        # 结果未知：不自动重发（可能已送达），意图就地收口并留痕。
+                        self.db.update_rows(
+                            "interlude_intent", {"id": intent.id, "status": "pending"},
+                            {
+                                "status": "completed",
+                                "payload": {**(intent.payload or {}), "deliveryUnknown": True},
+                                "updatedAt": now,
+                            },
+                        )
+                    else:
+                        self.db.update_rows(
+                            "interlude_intent", {"id": intent.id, "status": "pending"},
+                            {"status": "completed" if outcome == "delivered" else "pending", "updatedAt": now},
+                        )
+                        if outcome == "failed":
+                            self.db.update_rows("interlude_intent", {"id": intent.id}, {"notBefore": now + timedelta(seconds=30)})
                     handled += 1
                 else:
                     self.db.update_rows("interlude_intent", {"id": intent.id, "status": "pending"}, {"status": "cancelled", "updatedAt": now})

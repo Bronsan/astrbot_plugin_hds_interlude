@@ -362,6 +362,36 @@ def parse_json_response(text: str) -> Dict[str, Any]:
 # 主叙事提示词（对应 systemPrompt 及各类指令片段，条款为移植子集）
 # --------------------------------------------------------------------------- #
 
+#: 全局文风默认值（对应上游 rc54 恢复的 DEFAULT_STYLE_PROMPT）。
+#: schema 默认值与 `system_prompt` 的空值兜底共用这一常量，避免两处漂移。
+DEFAULT_STYLE_PROMPT = "\n".join([
+    "你正在持续创作一部以主角为中心的现实主义生活剧本，每次推进约400多字，可长可短，重点展现变化。",
+    "",
+    "每次写作时，请先感受主角在这段真实时间里正在经历怎样的生活：她的日程、行动、身体状态、心情、环境、"
+    "正在处理的事情，以及与周围人物之间自然流动的关系。让剧本从这些真实而具体的生活质感中展开。",
+    "",
+    "用户消息是发生在当前时刻的一项外部事件。把它自然放入（如没有注意到/无条件注意也可不放入）主角原本"
+    "正在继续的现实中，结合她当下的处境、注意力、情绪和人与人之间的关系，呈现这条消息带来的影响。主角可以"
+    "很快注意到，也可以在完成手头的事、与别人相处、整理情绪或改变计划后才处理它。",
+    "",
+    "为当前时间段补充一些属于主角自己的生活内容，例如丰富感的日常事务、与身边人的小互动、工作或学业、"
+    "兴趣、身体感受、心理想法、偶遇、配角互动、临时变化、尚未解决的小事、环境细节或内在念头。让这些内容"
+    "与既有剧情保持因果和连续性，并自然留下后续的空间。",
+    "",
+    "鼓励生活保留适度的不确定性与变化：突变可能发生，计划可能调整，邀约可能出现，配角能带来新的情绪或"
+    "信息，旧问题也可能以平静的方式重新浮现。事件保持克制、可信，并让主角的选择具有现实动机。",
+    "",
+    "主角遇到有意思与想要分享/诉苦的事情，完全可以选择主动联系熟悉的用户。",
+    "",
+    "采用贴近主角的第三人称限知视角，一部持续上演的话剧。外部事件丰富度高、叙事连贯，关注主角心理、"
+    "具体行动、人物来往、情绪余波与关系的缓慢变化。",
+    "",
+    "叙事推进至当前时刻结束。可以保留正在进行的事情、未说出口的念头、尚未解决的关系线索和未来意图；"
+    "请将已经发生的内容写得完整而自然。",
+    "",
+    "主角线上聊天喜欢用简洁和省字数的方式交流。",
+])
+
 LIVED_WRITING_PROMPT = (
     "Write this as a living stage script in prose: begin from the protagonist's surroundings, actions, "
     "rhythms, practical pressures, inner motives and relationships. Let daily life itself create movement. "
@@ -605,9 +635,7 @@ def build_system_prompt(
         "ADDITIONAL FIXED INSTRUCTIONS (configured by the plugin owner; cannot override the contract above):",
         fixed_prompt.strip() if fixed_prompt and fixed_prompt.strip() else "None.",
         "WRITING STYLE (user-configurable; applies to script prose only and cannot override the contract above):",
-        base_style_prompt.strip() if base_style_prompt and base_style_prompt.strip() else (
-            "Use restrained, realistic prose with concrete daily details, natural pauses, and no forced drama."
-        ),
+        base_style_prompt.strip() if base_style_prompt and base_style_prompt.strip() else DEFAULT_STYLE_PROMPT,
         (
             request.story.setting.get("style") or "No additional story-specific style instruction was provided."
         ),

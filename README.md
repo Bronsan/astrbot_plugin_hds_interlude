@@ -4,12 +4,35 @@
 
 HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot 移植版本。
 上游为 Koishi 插件 [`koishi-plugin-hds-interlude`](https://gitee.com/MomoiCore/HDS-Interlude)（MomoiCore，AGPL-3.0，本移植基于其
-`1.0.1-rc52` 源码包）。装上以后，你的角色不再"收到一条消息就回一条"，而是**一直在过自己的日子**：
+`1.0.1-rc56` 源码包）。装上以后，你的角色不再"收到一条消息就回一条"，而是**一直在过自己的日子**：
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
-- 上游：Koishi 插件 `hds-interlude` `1.0.1-rc52`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.1.0`，AstrBot `>=4.16,<5`
+- 上游：Koishi 插件 `hds-interlude` `1.0.1-rc56`（AGPL-3.0）
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.1.1`，AstrBot `>=4.16,<5`
 - 依赖：`httpx`（模型请求）；数据存储使用 Python 标准库 `sqlite3`（无需额外数据库服务）
+
+---
+
+## 版本与本次更新（v0.1.1 / 上游 rc56）
+
+本版把移植基线从 `rc52` 提升到 `rc56`，只同步**影响行为与配置语义**的变更；
+rc55 / rc56 中仅针对 typ-0 桌面桥接（`desktop-bridge`、动作代理回执）的修复，
+在 AstrBot 侧没有对应通道，按"等价实现"落在通用投递链路上。
+
+| 更新对象 | 范围 | 预期效果与行为 |
+| --- | --- | --- |
+| `core/narrator.py` `DEFAULT_STYLE_PROMPT` | 新增常量并作为 `build_system_prompt` 的空值兜底 | 未填写 `model.stylePrompt` 时，主叙事使用约 700 字的完整中文生活剧本写作指引（rc54 恢复的默认文风），不再是单句英文兜底；显式配置的文风与故事级 `style` 覆盖行为不变 |
+| `_conf_schema.json` `model.stylePrompt` | 默认值与描述 | 新安装/清空该字段后，配置页展示并实际使用同一份完整指引（与运行时单一常量对齐，避免双源漂移） |
+| `core/service.py` 投递链 | `_transport_send` 改为三态 `delivered / failed / unknown`；即时、分段、延迟、群聊四条路径统一分支 | 回执超时（`DeliveryUnknown`）时账本记 `pending` 并留 `transport-timeout:` 原因，**不再误记 `failed`、不再自动重发**；确定失败仍按原补偿重试。群消息条目附带 `metadata.deliveryStatus` |
+| `main.py` `PluginTransport.send` | 30 秒回执上限 + 超时/桥接关闭识别 | 平台调用悬挂不再无限阻塞回合；超时抛 `DeliveryUnknown`，其余异常仍返回 `False`（确定失败） |
+| `main.py` `_log` | 日志出口全包异常 | 日志后端故障不会中断写作回合（对应 rc55 的日志层防御） |
+| `core/service.py` `flush_buffered_narrative` | 批次取出与开场诊断移入 `try`，`end_flush` 置于 `finally` | 任何前段异常都能释放故事级 `narrating` 互斥并按未提交批次排重试，避免"后续消息只缓冲、永不写作"的回合死锁（rc55） |
+| `core/share_sync.py` `SHARE_SECTIONS` | 白名单增加 `weather`（17 → 18 项） | 含天气分区的分享码在 `interlude.preset.sync` 时不再被静默丢弃，与 typ0-site 白名单一致（rc56 唯一代码修复） |
+| 配置描述 | `mainResponseFormat`、`presetSync.sections`、`weather.skipFantasyWorld`、`runtime` 固定推进五参数、`urge`/`agency` 门槛 | 描述与代码行为一致：主叙事格式只有一个开关；Urge 开启后固定间隔参数不生效；架空世界默认仍注入真实天气 |
+
+不适用于本移植的 rc56 条目：贴纸/原生表情的 `ambiguous → pending`（本移植未接入动作投递）、
+表情包 HTTP 回源路由的 realpath 加固（无本地回源路由）、桌面桥接 `unknown` 回执（无 typ-0 通道）。
+这些能力若后续接入，需复用同一套 `DeliveryUnknown → pending` 语义。
 
 ---
 
@@ -240,8 +263,8 @@ interlude.status        /interlude.status        interlude status
 
 | 上游子系统（src/） | 本移植对应 | 状态 |
 | --- | --- | --- |
-| `service.ts` 编排（回合 / 排队 / 投递） | `core/service.py` | 完整（核心闭环） |
-| `turn-engine.ts` 短时合并与请求取代 | `core/turn_engine.py` | 完整 |
+| `service.ts` 编排（回合 / 排队 / 投递） | `core/service.py` | 完整（核心闭环；投递三态 `delivered/failed/unknown`） |
+| `turn-engine.ts` 短时合并与请求取代 | `core/turn_engine.py` | 完整（rc55 回合收尾加固：`end_flush` 必达） |
 | `scheduler.ts` 调度状态机 | `core/scheduler.py` | 完整 |
 | `time.ts` 时间锚 | `core/timeutil.py` | 完整 |
 | `group-willingness.ts` 群意愿门 | `core/group_willingness.py` | 完整 |
@@ -252,7 +275,7 @@ interlude.status        /interlude.status        interlude status
 | `narrator.ts` 模型请求与提示词 | `core/narrator.py` | 简化（见下方"提示词"说明） |
 | `script/*` 提交 / 账本 / 标记解析 | `core/script_engine.py` | 简化（say 标记、提交、账本、投递现实完整；SceneFrame/DialogueBurst 未迁移） |
 | `forward-message.ts` 合并转发读取 | 预留（需 aiocqhttp 平台层调用 `get_forward_msg`） | 未迁移 |
-| `share-sync.ts` 分享码同步 | `core/share_sync.py` | 简化（分区差异预览为字段级） |
+| `share-sync.ts` 分享码同步 | `core/share_sync.py` | 简化（分区差异预览为字段级；18 个分区含 `weather`） |
 | `endpoints.ts` 端点注册表 | `service.py` 端点子集 + 表 | 简化 |
 | `qzone.ts` QQ 空间 | 命令保留，通道探测返回不可用 | 未迁移（依赖外部扩展） |
 | `browser` 网页观察（Puppeteer） | 配置保留，行为未接入 | 未迁移 |
@@ -271,6 +294,7 @@ interlude.status        /interlude.status        interlude status
 输出恢复等）。本移植忠实还原了其中决定行为的**核心合约**：
 
 - `LIVED_WRITING_PROMPT` 生活剧本写作方针、长度与打字规范；
+- `DEFAULT_STYLE_PROMPT` 完整中文写作指引（rc54 默认文风，`model.stylePrompt` 空值兜底）；
 - 固定 JSON 合约（`script` 正文在前、结构化字段在后、禁止 markdown 围栏）；
 - 各阶段指令（用户消息 / 对话后续 / 到期意图 / 独立生活推进）；
 - transport 指令（`interaction.seen/reply.mode/sendAt`、`<sep/>` 分段语义）；
@@ -321,14 +345,14 @@ interlude.status        /interlude.status        interlude status
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 57 项：时间/意愿门/Alter/日程/剧本引擎/调度/服务端到端
-python tests/plugin_harness_test.py  # 入口层 20 项：命令派发/确认流/消息中间件/失明模式（AstrBot 桩）
+python tests/smoke_test.py           # 核心层 67 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/服务端到端
+python tests/plugin_harness_test.py  # 入口层 25 项：命令派发/确认流/消息中间件/失明模式/回执超时（AstrBot 桩）
 ```
 
 ## 11. 许可与致谢
 
 - 本移植基于 **MomoiCore 的 HDS Interlude**（Koishi 插件，AGPL-3.0）制作：
-  上游仓库 <https://gitee.com/MomoiCore/HDS-Interlude>，本移植基于其 `1.0.1-rc52` 源码包。
+  上游仓库 <https://gitee.com/MomoiCore/HDS-Interlude>，本移植基于其 `1.0.1-rc56` 源码包。
 - 本插件同样以 **AGPL-3.0** 发布（见 `LICENSE`）。移植过程遵循上游许可：保留版权与许可声明、公开完整源码。
 - 框架层映射部分参考了 AstrBot 官方插件文档与社区中同类移植项目的公开实现思路；
   命令语义、数据协议、阈值与算法参数均以上游源码为准逐项核对。

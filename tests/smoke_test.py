@@ -26,11 +26,20 @@ from core import agency as agency_mod  # noqa: E402
 from core import group_willingness as gw  # noqa: E402
 from core import schedule_preplan as preplan  # noqa: E402
 from core import script_engine as se  # noqa: E402
-from core.narrator import NarrativeResult  # noqa: E402
+from core.narrator import DEFAULT_STYLE_PROMPT, NarrativeResult, build_system_prompt  # noqa: E402
 from core.service import InterludeService, SessionView  # noqa: E402
+from core.share_sync import SHARE_SECTIONS  # noqa: E402
 from core.timeutil import story_local_time_context  # noqa: E402
 from core.turn_engine import TurnEngine, should_supersede_request  # noqa: E402
-from core.types import now_utc, to_iso  # noqa: E402
+from core.types import (  # noqa: E402
+    DeliveryUnknown,
+    NarrativeRequest,
+    Story,
+    empty_story_setting,
+    empty_story_state,
+    now_utc,
+    to_iso,
+)
 
 PASSED = 0
 FAILED: list[str] = []
@@ -288,6 +297,86 @@ def build_config() -> dict:
     }
 
 
+async def test_rc56_alignment() -> None:
+    """rc54 / rc56 对齐项：默认文风与分享分区白名单。"""
+    check("默认文风为完整中文指引", "你正在持续创作一部以主角为中心的现实主义生活剧本" in DEFAULT_STYLE_PROMPT, DEFAULT_STYLE_PROMPT[:60])
+    check("默认文风覆盖生活质感段落", "让剧本从这些真实而具体的生活质感中展开" in DEFAULT_STYLE_PROMPT, "")
+    now = now_utc()
+    story = Story(
+        id="style-story", platform="onebot", selfId="1", userId="2", channelId="c",
+        status="active",
+        setting={**empty_story_setting(), "style": ""},
+        state=empty_story_state(),
+        cursorAt=now, createdAt=now, updatedAt=now,
+    )
+    request = NarrativeRequest(phase="user-message", story=story, from_at=now, now=now)
+    prompt = build_system_prompt(request, "", "", "", "", False, False, "off")
+    check("空文风回落默认指引", DEFAULT_STYLE_PROMPT in prompt, prompt[-400:])
+    overridden = build_system_prompt(request, "自定义文风：冷静克制。", "", "", "", False, False, "off")
+    check("显式文风覆盖默认", "自定义文风：冷静克制。" in overridden and DEFAULT_STYLE_PROMPT not in overridden, overridden[-200:])
+    check("分享分区包含 weather", "weather" in SHARE_SECTIONS, str(SHARE_SECTIONS))
+    check("分享分区 18 项", len(SHARE_SECTIONS) == 18, str(len(SHARE_SECTIONS)))
+
+
+class UnknownTransport:
+    """模拟回执超时：请求已写出但结果不可知。"""
+
+    async def send(self, umo: str, text: str) -> bool:
+        raise DeliveryUnknown("transport-timeout: 回执超时")
+
+
+async def test_delivery_unknown() -> None:
+    """rc53 / rc56 投递语义：结果未知记 pending，且不自动重试。"""
+    tmp = tempfile.mkdtemp(prefix="hdsi-unknown-")
+    try:
+        config = build_config()
+        service = InterludeService(
+            config_getter=lambda: config,
+            data_dir=tmp,
+            logger=lambda level, message: None,
+            transport=UnknownTransport(),
+        )
+        session = SessionView(
+            platform="onebot", selfId="90001", userId="10001", channelId="onebot:FriendMessage:10001",
+            isDirect=True, content="在吗", senderName="小林", umo="onebot:FriendMessage:10001",
+        )
+        story = await service.create_story(session)
+        participant = await service.find_participant(session, story)
+        now = now_utc()
+        decision = {
+            "script": "她看了一眼手机。",
+            "interaction": {"seen": True, "reply": {"mode": "immediate", "content": "在的"}},
+            "authoredActions": [],
+            "intents": [],
+            "intentUpdates": [],
+            "crossConversationActions": [],
+            "memories": [],
+            "alter": None,
+            "agencyWindow": None,
+            "proactiveContact": None,
+            "statePatch": None,
+            "localMedia": None,
+            "nativeFace": None,
+            "messageReactions": None,
+            "droppedProactiveActions": [],
+            "followUpResolutions": [],
+        }
+        persisted = await service._persist_turn(story.id, participant.id, decision, now, now, "user-message")
+        delivery = await service._deliver_messages_for_participant(story, participant, persisted["messages"], 0.0)
+        check("unknown 不计入已投递", delivery == [], str(delivery))
+        entries = await service.recent_entries(story.id, 10)
+        script_row = next(entry for entry in entries if entry.kind == "script")
+        actions = (script_row.metadata or {}).get("deliveryActions") or []
+        statuses = [segment["status"] for action in actions for segment in action.get("segments", [])]
+        check("unknown 账本记 pending", statuses == ["pending"], str(statuses))
+        retry = service.db.first_row("interlude_intent", {"storyId": story.id, "type": "delayed-message"})
+        check("unknown 不排补偿重试", retry is None, str(retry))
+        check("unknown 状态直读", await service._transport_send("umo", "你好") == "unknown", "")
+        service.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def test_service_end_to_end() -> None:
     tmp = tempfile.mkdtemp(prefix="hdsi-test-")
     try:
@@ -387,6 +476,8 @@ async def main() -> None:
     test_schedule_preplan()
     test_agency()
     await test_turn_engine()
+    await test_rc56_alignment()
+    await test_delivery_unknown()
     await test_service_end_to_end()
     print(f"\n通过 {PASSED} 项")
     if FAILED:

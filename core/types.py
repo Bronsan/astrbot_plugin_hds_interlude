@@ -39,6 +39,19 @@ OVERLAY_CLEAR_TARGETS = ("character", "perspective", "relationship", "world", "a
 DEFAULT_MESSAGE_SEPARATOR = "<sep/>"
 
 
+class DeliveryUnknown(Exception):
+    """投递结果未知（对应上游 `transportTimeout` / `ambiguous`）。
+
+    平台请求已经写出，但回执超时或桥接关闭——消息可能已经到达。
+    调用方必须把账本记为 `pending`（而不是 `failed`），且**不得自动重试**，
+    否则会在消息实际已送达时重复发送（上游 rc53 / rc56 的回执语义）。
+    """
+
+    def __init__(self, reason: str = "transport-timeout") -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def now_utc() -> datetime:
     """当前 UTC 时间。项目中一切持久化时间都用 aware UTC datetime。"""
     return datetime.now(timezone.utc)

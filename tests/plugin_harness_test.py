@@ -24,6 +24,10 @@ plugin_main = importlib.import_module(f"{os.path.basename(BASE)}.main")
 from tests.smoke_test import build_config  # noqa: E402
 from core.narrator import NarrativeResult  # noqa: E402
 
+# 必须使用插件包内的类型：`core.types`（顶层导入）与
+# `astrbot_plugin_hds_interlude.core.types` 是两个不同的模块对象。
+DeliveryUnknown = plugin_main.DeliveryUnknown
+
 PASSED = 0
 FAILED: list[str] = []
 
@@ -209,6 +213,37 @@ async def main() -> None:
             future.set_result("n")
         out_y = await asyncio.wait_for(task_y, 5)
         check("回答 n 后取消", out_y == "操作已取消。", str(out_y))
+
+        # 11) 回执超时 → DeliveryUnknown（结果未知语义，对应上游 rc53/rc56）
+        config["blindMode"] = {"enabled": False}
+        plugin._blind = False
+
+        async def _timeout_send(umo, chain):
+            raise asyncio.TimeoutError("platform timeout")
+
+        plugin.context.send_message = _timeout_send  # type: ignore[assignment]
+        try:
+            await plugin.transport.send("umo", "文本")
+            timeout_raised = False
+        except DeliveryUnknown:
+            timeout_raised = True
+        check("回执超时抛 DeliveryUnknown", timeout_raised, "")
+
+        # 12) 日志层防御：logger 抛错不影响调用（对应上游 rc55 writeReport 防御）
+        original_info = plugin_main.astrbot_logger.info
+
+        def _broken_info(*args, **kwargs):
+            raise RuntimeError("logger down")
+
+        plugin_main.astrbot_logger.info = _broken_info  # type: ignore[assignment]
+        try:
+            plugin._log("info", "日志防御检查")
+            log_safe = True
+        except Exception:  # noqa: BLE001
+            log_safe = False
+        finally:
+            plugin_main.astrbot_logger.info = original_info  # type: ignore[assignment]
+        check("日志失败不抛出", log_safe, "")
     finally:
         await plugin.terminate()
 

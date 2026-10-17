@@ -48,10 +48,33 @@ from .core.share_sync import (
     summarize_share,
 )
 from .core.timeutil import format_log_time, format_story_display_time
-from .core.types import now_utc, to_iso
+from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "v0.1.0"
+PLUGIN_VERSION = "v0.1.1"
+
+#: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
+TRANSPORT_TIMEOUT_SECONDS = 30
+
+#: 回执超时类错误的判定关键字（平台异常类名或错误文本）。
+_UNKNOWN_DELIVERY_HINTS = (
+    "timeout",
+    "timed out",
+    "deadline exceeded",
+    "超时",
+    "bridge closed",
+    "bridge 已关闭",
+)
+
+
+def _is_unknown_delivery_error(error: BaseException) -> bool:
+    """判断异常是否表示“请求已写出但结果未知”（对应 transportTimeout）。"""
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    if "timeout" in type(error).__name__.lower():
+        return True
+    text = str(error).lower()
+    return any(hint in text for hint in _UNKNOWN_DELIVERY_HINTS)
 
 #: 确认等待时长（对应上游 askConfirmation 的 60 秒）。
 CONFIRMATION_TIMEOUT_SECONDS = 60
@@ -78,13 +101,25 @@ class PluginTransport:
         self._plugin = plugin
 
     async def send(self, umo: str, text: str) -> bool:
-        """主动/延迟投递一条文本消息。"""
+        """主动/延迟投递一条文本消息。
+
+        返回 False 表示确定失败；回执超时/桥接关闭抛 `DeliveryUnknown`，
+        由服务层把账本记为 pending 且不自动重试（对应上游 rc53/rc56）。
+        """
         if not umo or not text:
             return False
         try:
             chain = MessageChain([Plain(text)])
-            return bool(await self._plugin.context.send_message(umo, chain))
+            return bool(await asyncio.wait_for(
+                self._plugin.context.send_message(umo, chain),
+                timeout=TRANSPORT_TIMEOUT_SECONDS,
+            ))
+        except asyncio.CancelledError:
+            raise
         except Exception as error:  # noqa: BLE001 - 投递失败由账本记录
+            if _is_unknown_delivery_error(error):
+                astrbot_logger.warning(f"{PLUGIN_NAME}: 发送消息结果未知（可能已送达）: {error}")
+                raise DeliveryUnknown(f"transport-timeout: {error}") from error
             astrbot_logger.warning(f"{PLUGIN_NAME}: 发送消息失败: {error}")
             return False
 
@@ -211,17 +246,21 @@ class HDSInterludePlugin(Star):
         return self._blind or bool((self._config_section("blindMode") or {}).get("enabled"))
 
     def _log(self, level: str, message: str) -> None:
-        if self._blind_now() and level not in ("error",):
+        """日志出口：任何情况下都不得抛出（对应上游 rc55 的日志层防御）。"""
+        try:
+            if self._blind_now() and level not in ("error",):
+                return
+            line = f"{PLUGIN_NAME}: {message}"
+            if level == "error":
+                astrbot_logger.error(line)
+            elif level == "warn":
+                astrbot_logger.warning(line)
+            elif level == "debug":
+                astrbot_logger.debug(line)
+            else:
+                astrbot_logger.info(line)
+        except Exception:  # noqa: BLE001 - 日志失败不能拖垮回合
             return
-        line = f"{PLUGIN_NAME}: {message}"
-        if level == "error":
-            astrbot_logger.error(line)
-        elif level == "warn":
-            astrbot_logger.warning(line)
-        elif level == "debug":
-            astrbot_logger.debug(line)
-        else:
-            astrbot_logger.info(line)
 
     async def _background(self) -> None:
         try:
