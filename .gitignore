@@ -9,5 +9,6 @@ __pycache__/
 .venv/
 venv/
 
-# 打包产物（发行 zip 不随源码仓库提交）
+# 打包产物（发行 zip 仅按版本归档在 vX.Y.Z/ 文件夹入库）
 *.zip
+!v*/*.zip
