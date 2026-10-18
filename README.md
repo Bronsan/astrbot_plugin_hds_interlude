@@ -8,8 +8,37 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.2.0`，AstrBot `>=4.16,<5`
-- 依赖：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.2.1`，AstrBot `>=4.16,<5`
+- **依赖插件（必需）**：`astrbot_plugin_image_caption_cache` `v1.3.1`
+  —— 必须使用仓库根目录的 **`astrbot_plugin_image_caption_cache_v1.3.1.zip`** 安装，
+  不能使用插件市场的上游 1.3.0。上游补丁未适配 AstrBot 4.28+ 的 `image_ref` /
+  `montage_refs` 签名，会在引用图片转述时抛 `unexpected keyword argument`；
+  本仓库的 1.3.1 修复版同时兼容 AstrBot 4.16–4.29，详见 [第 2 节](#2-安装)。
+- 依赖库：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
+
+---
+
+## 版本与本次更新（v0.2.1 / 依赖声明）
+
+本版**不改变叙事与投递逻辑**，只做发布层面的调整：把图片转述缓存插件写成显式依赖，
+并同步版本号。
+
+| 修改对象 | 修改内容 | 预期效果 |
+| --- | --- | --- |
+| `README.md` 开头 | 新增“依赖插件（必需）”：`astrbot_plugin_image_caption_cache` `v1.3.1`，指定使用本仓库根目录的 `astrbot_plugin_image_caption_cache_v1.3.1.zip` | 安装者不会再误装插件市场的上游 1.3.0 |
+| `README.md` 第 2 节 | 安装步骤新增“先装依赖插件”，并给出必须 ≥1.3.1 的原因 | 按文档顺序安装即可避开运行时崩溃 |
+| `metadata.yaml` / 本文档 / 交接文档 | 版本 `v0.2.0 → v0.2.1`（zip 文件名同步） | 元数据、文档、安装包三者一致 |
+
+依赖版本说明：图片转述缓存插件必须使用 **v1.3.1**。上游 v1.3.0 的运行时补丁只声明到
+`skip_quote_image_caption`，而 AstrBot 4.28 起调用方会传 `image_ref=`（4.29 追加
+`image_is_montage=`、`montage_refs=`），因此会在处理引用图片时抛：
+
+```text
+cached_process_quote_message() got an unexpected keyword argument 'image_ref'
+```
+
+v1.3.1 改为按原函数签名动态绑定参数：4.28+ 走“已准备图片”路径，≤4.27 仍从
+`quote.chain` 取图；`_decorate_llm_request` 的集合返回值也原样透传。
 
 ---
 
@@ -128,23 +157,32 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 ### 方式一：手动安装（推荐）
 
-1. 把本目录整个放进 AstrBot 的插件目录：
+1. **先安装依赖插件（必需）**：在 AstrBot 后台「插件管理 → 上传安装」中选择本仓库根目录的
+   `astrbot_plugin_image_caption_cache_v1.3.1.zip`，装好后确认「已启用」。
+   - 必须使用该 **v1.3.1** 构建：上游 1.3.0 不兼容 AstrBot 4.28+ 的图片转述签名，
+     引用图片时会抛 `unexpected keyword argument 'image_ref'`。
+   - 以后升级 HDS 时不要回退该依赖；`/image_caption_cache_stats` 可确认补丁已生效
+     （`quoted_message` 出现在补丁列表里）。
+
+2. 把本目录整个放进 AstrBot 的插件目录：
 
    ```text
    AstrBot/data/plugins/astrbot_plugin_hds_interlude/
    ```
 
-2. 在插件目录里安装依赖（或让 AstrBot 的插件管理器自动安装 `requirements.txt`）：
+3. 在插件目录里安装依赖（或让 AstrBot 的插件管理器自动安装 `requirements.txt`）：
 
    ```bash
    pip install -r requirements.txt
    ```
 
-3. 重启 AstrBot 或在 WebUI「插件」页重载插件。
+4. 重启 AstrBot 或在 WebUI「插件」页重载插件。
 
 ### 方式二：从链接安装
 
 把仓库根目录地址填进 AstrBot 后台「插件管理 → 从链接安装」。本仓库根目录**就是**插件目录，`metadata.yaml` 在根上。
+
+> 依赖插件不能通过本仓库链接安装，仍需单独上传 `astrbot_plugin_image_caption_cache_v1.3.1.zip`。
 
 ## 3. 快速开始（三步）
 
