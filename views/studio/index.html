@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>HDS 角色工作室</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
+              <path d="M6 24V8.5A2.5 2.5 0 0 1 8.5 6H14l3 4h6.5A2.5 2.5 0 0 1 26 12.5V24a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+              <path d="M11 16h10M11 20h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <strong>角色工作室</strong>
+            <span>HDS Interlude</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item" data-nav="overview">
+            <span class="nav-icon">◈</span><span>概览</span>
+          </button>
+          <button class="nav-item" data-nav="characters">
+            <span class="nav-icon">◐</span><span>角色身份</span>
+            <span class="nav-count" id="nav-character-count">0</span>
+          </button>
+          <button class="nav-item" data-nav="lorebooks">
+            <span class="nav-icon">▤</span><span>世界书</span>
+            <span class="nav-count" id="nav-lorebook-count">0</span>
+          </button>
+          <button class="nav-item" data-nav="prompts">
+            <span class="nav-icon">✎</span><span>叙事提示词</span>
+          </button>
+          <button class="nav-item" data-nav="binding">
+            <span class="nav-icon">⇄</span><span>故事绑定</span>
+          </button>
+          <div class="nav-divider"></div>
+          <button class="nav-item" data-nav="import">
+            <span class="nav-icon">↧</span><span>导入中心</span>
+          </button>
+          <button class="nav-item" data-nav="about">
+            <span class="nav-icon">?</span><span>说明</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="active-chip" id="sidebar-active">
+            <span class="dot"></span>
+            <span>未选择当前角色</span>
+          </div>
+          <p class="sidebar-note">API Key、模型连接与平台账号仍保留在插件配置页。</p>
+        </div>
+      </aside>
+
+      <div class="main">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button class="icon-btn only-mobile" id="btn-menu" aria-label="打开导航">☰</button>
+            <div class="crumbs" id="crumbs">
+              <span class="crumb">概览</span>
+            </div>
+          </div>
+          <div class="topbar-right">
+            <div class="search" role="search">
+              <svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+                <circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+                <path d="m13.4 13.4 3.1 3.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+              <input id="global-search" type="search" placeholder="搜索角色或世界书…" autocomplete="off" />
+              <kbd>⌘K</kbd>
+            </div>
+            <div class="save-state" id="save-state" data-state="idle">已同步</div>
+            <button class="btn btn-primary" id="btn-new-character">
+              <span class="btn-plus">＋</span> 新建角色
+            </button>
+          </div>
+        </header>
+
+        <main class="view" id="view" tabindex="-1">
+          <div class="skeleton-page">
+            <div class="skeleton skeleton-title"></div>
+            <div class="skeleton-grid">
+              <div class="skeleton skeleton-card"></div>
+              <div class="skeleton skeleton-card"></div>
+              <div class="skeleton skeleton-card"></div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    <div class="modal-root" id="modal-root" hidden></div>
+    <div class="drawer-root" id="drawer-root" hidden></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "views": {
+    "studio": {
+      "title": "Character Studio",
+      "description": "Manage character identities, world books and narrative prompts; Type0 and SillyTavern formats supported.",
+      "heading": "Character Studio",
+      "save": "Save",
+      "import": "Import",
+      "new_character": "New character"
+    }
+  }
+}

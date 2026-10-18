@@ -40,12 +40,14 @@ except ImportError:  # pragma: no cover
 
         return decorator
 
+from .core.content_store import ContentStore
 from .core.service import (
     InterludeService,
     SessionView,
     is_interlude_command_like,
     normalize_interlude_spacing,
 )
+from .core.studio_api import StudioAPI, StudioError
 from .core.share_sync import (
     build_config_patch,
     default_share_base,
@@ -58,7 +60,7 @@ from .core.timeutil import format_log_time, format_story_display_time
 from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "v0.2.0"
+PLUGIN_VERSION = "v0.3.0"
 
 #: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
 TRANSPORT_TIMEOUT_SECONDS = 30
@@ -502,12 +504,21 @@ class HDSInterludePlugin(Star):
         self.config = config if config is not None else {}
         self._blind = bool((self._config_section("blindMode") or {}).get("enabled"))
         data_dir = self._resolve_data_dir()
+        self.content_store = ContentStore(data_dir, logger=self._log)
         self.transport = PluginTransport(self)
         self.service = InterludeService(
-            config_getter=self._config_view,
+            config_getter=self._effective_config,
             data_dir=data_dir,
             logger=self._log,
             transport=self.transport,
+            content_store=self.content_store,
+        )
+        self.studio_api = StudioAPI(
+            self.content_store,
+            story_lister=self._studio_story_list,
+            story_applier=self._studio_apply_story,
+            default_base=self._type0_share_base(),
+            logger=self._log,
         )
         self._confirmations: Dict[str, asyncio.Future] = {}
         self._background_task: Optional[asyncio.Task] = None
@@ -517,6 +528,7 @@ class HDSInterludePlugin(Star):
         if not self._blind:
             astrbot_logger.info(f"{PLUGIN_NAME}: 插件加载完成 {PLUGIN_VERSION}")
         self._register_commands()
+        self._register_studio_web_api()
         self._background_task = asyncio.get_event_loop().create_task(self._background())
         self._type0_task = asyncio.get_event_loop().create_task(self._auto_import_type0())
         if self._blind:
@@ -536,6 +548,81 @@ class HDSInterludePlugin(Star):
     def _config_section(self, name: str) -> Dict[str, Any]:
         section = self._config_view().get(name)
         return section if isinstance(section, dict) else {}
+
+    def _effective_config(self) -> Dict[str, Any]:
+        """WebUI 内容叠加后的配置视图（仅服务层使用）。
+
+        角色身份、世界书、叙事提示词保存在 `content_store`；这里按每次读取
+        叠加到 AstrBot 配置之上，保证 WebUI 修改无需重载插件即可生效。
+        配置页原字段保留为「回退默认值」，也便于回滚。
+        """
+        raw = self._config_view()
+        try:
+            return self.content_store.apply_config_overrides(raw)
+        except Exception as error:  # noqa: BLE001 - 内容层异常不能拖垮叙事
+            self._log("warn", f"应用 WebUI 内容失败，回退配置值：{error}")
+            return raw
+
+    def _type0_share_base(self) -> str:
+        sync = self._config_section("presetSync")
+        base = str(sync.get("baseUrl") or "").strip()
+        return base or "https://typ0.space"
+
+    async def _studio_story_list(self) -> List[Dict[str, Any]]:
+        try:
+            return await self.service.list_story_summaries()
+        except Exception as error:  # noqa: BLE001
+            self._log("warn", f"WebUI 读取故事列表失败：{error}")
+            return []
+
+    async def _studio_apply_story(self, story_id: str, patch: Dict[str, Any]) -> None:
+        story = await self.service.get_story(story_id)
+        if story is None:
+            raise StudioError("故事不存在", 404)
+        await self.service.update_setting(story, patch)
+
+    def _register_studio_web_api(self) -> None:
+        """注册 WebUI「角色工作室」后端动作端点。
+
+        使用 AstrBot 4.14+ 的插件页面 bridge；旧版本没有
+        `register_web_api` 时只记录日志，不影响插件主体。
+        """
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            self._log("info", "当前 AstrBot 不支持插件可视化视图，WebUI 未注册（插件功能不受影响）。")
+            return
+        try:
+            from astrbot.api.web import error_response, json_response, request
+        except Exception as error:  # noqa: BLE001 - 旧版没有 astrbot.api.web
+            self._log("warn", f"插件页面 API 不可用：{error}")
+            return
+
+        async def studio_action():
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象", status_code=400)
+            action = str(payload.get("action") or "").strip()
+            arguments = payload.get("payload")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            try:
+                data = await self.studio_api.dispatch(action, arguments)
+            except StudioError as error:
+                return error_response(error.message, status_code=error.status)
+            except Exception as error:  # noqa: BLE001 - 统一转成可读错误
+                self._log("error", f"WebUI 操作失败 action={action}：{error}")
+                return error_response(f"操作失败：{error}", status_code=500)
+            return json_response(data)
+
+        try:
+            register(
+                f"/{PLUGIN_NAME}/studio/action",
+                studio_action,
+                ["POST"],
+                "HDS Interlude Studio action",
+            )
+        except Exception as error:  # noqa: BLE001 - 路由冲突等
+            self._log("warn", f"注册 WebUI 端点失败：{error}")
 
     def _resolve_data_dir(self) -> str:
         try:

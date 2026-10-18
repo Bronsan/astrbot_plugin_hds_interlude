@@ -293,10 +293,12 @@ class InterludeService:
         data_dir: str,
         logger: Callable[[str, str], None],
         transport: Any,
+        content_store: Any = None,
     ) -> None:
         self._config_getter = config_getter
         self._log = logger
         self._transport = transport
+        self.content_store = content_store
         self.db = Database(f"{data_dir}/hdsi.db")
         self.data_dir = data_dir
         self.scheduler = Scheduler(
@@ -574,6 +576,29 @@ class InterludeService:
     async def get_story(self, story_id: str) -> Optional[Story]:
         row = self.db.first_row("interlude_story", {"id": story_id})
         return self._row_to_story(row) if row else None
+
+    async def list_story_summaries(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """WebUI 绑定页用的故事列表（只读摘要，不含剧本正文）。"""
+        rows = self.db.list_rows(
+            "interlude_story",
+            {"status": {"$ne": "archived"}},
+            order_by="updatedAt DESC",
+            limit=max(1, min(int(limit or 30), 100)),
+        )
+        summaries: List[Dict[str, Any]] = []
+        for row in rows:
+            story = self._row_to_story(row)
+            character = (story.setting.get("character") or {}) if isinstance(story.setting, dict) else {}
+            summaries.append(
+                {
+                    "id": story.id,
+                    "label": str(character.get("name") or "未命名故事"),
+                    "platform": story.platform,
+                    "status": story.status,
+                    "updatedAt": to_iso(story.updatedAt),
+                }
+            )
+        return summaries
 
     async def get_participant(self, participant_id: str) -> Optional[Participant]:
         row = self.db.first_row("interlude_participant", {"id": participant_id})
@@ -1686,6 +1711,18 @@ class InterludeService:
             messageSeparator=str(runtime.get("messageSeparator") or DEFAULT_MESSAGE_SEPARATOR),
             splitReplyMessages=runtime.get("splitReplyMessages") is not False,
         )
+        if self.content_store is not None:
+            try:
+                activation_text = "\n".join(
+                    entry.content for entry in selected[-8:] if getattr(entry, "content", "")
+                )[-12000:]
+                request.characterCard = self.content_store.character_for_story(story.id)
+                request.worldBookEntries = self.content_store.activated_entries(
+                    story.id,
+                    activation_text,
+                )
+            except Exception as error:  # noqa: BLE001 - 内容层失败降级为无角色卡
+                self._log("warn", f"装配 WebUI 角色/世界书失败：{error}")
         return request
 
     async def _plan_timeline(

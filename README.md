@@ -8,13 +8,30 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.2.1`，AstrBot `>=4.16,<5`
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.0`，AstrBot `>=4.16,<5`
 - **依赖插件（必需）**：`astrbot_plugin_image_caption_cache` `v1.3.1`
   —— 必须使用仓库根目录的 **`astrbot_plugin_image_caption_cache_v1.3.1.zip`** 安装，
   不能使用插件市场的上游 1.3.0。上游补丁未适配 AstrBot 4.28+ 的 `image_ref` /
   `montage_refs` 签名，会在引用图片转述时抛 `unexpected keyword argument`；
   本仓库的 1.3.1 修复版同时兼容 AstrBot 4.16–4.29，详见 [第 2 节](#2-安装)。
 - 依赖库：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
+
+---
+
+## 版本与本次更新（v0.3.0 / WebUI 角色工作室）
+
+本版新增插件可视化视图「**角色工作室**」，把内容型配置迁出 AstrBot 配置页，并首次内置 Type0 导入。
+
+| 修改对象 | 修改内容 | 预期效果 |
+| --- | --- | --- |
+| 新增 `views/studio/` + `core/content_store.py` + `core/studio_api.py` | WebUI 管理角色身份（酒馆 V2 角色卡）、世界书（World Info）、叙事提示词与故事绑定 | 内容改动即时生效，无需重载插件 |
+| `_conf_schema.json` | `storyDefaults`、`model.*Prompt`、`alterSystem.prompt`、`mainPromptOverride` 标记 `invisible`，仅保留为回退默认值 | 配置页只保留 API Key、模型连接、平台账号与运行参数 |
+| Type0 导入 | 下拉选择「手动填写 / Type0 导入」；Type0 直连分享站拉取 `storyDefaults` 并自动映射 | 一键填充角色身份与世界设定，无需桌面端 |
+| 酒馆格式 | 支持 V2/V1 JSON、PNG `chara` 数据块、World Info JSON 的导入与导出 | 与 SillyTavern 生态互通 |
+
+核心叙事与投递逻辑**不变**；原有 181 项测试全部通过，新增 WebUI 离线测试（见 [WebUI 章节](#webui-角色工作室)）。
+
+页面结构、字段清单、下拉交互与 Type0 映射详见下文「WebUI 角色工作室」。
 
 ---
 
@@ -141,6 +158,84 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 ---
 
+## WebUI 角色工作室
+
+> 打开方式：AstrBot WebUI →「插件」→ 找到 HDS Interlude → 插件详情 → 打开可视化视图「角色工作室」。
+> 视图目录 `views/studio/`；后端动作统一走 `POST /astrbot_plugin_hds_interlude/studio/action`。
+
+### 定位与边界
+
+- **WebUI 管理**：角色身份（角色卡）、世界书、叙事提示词、故事绑定。
+- **配置页保留**：模型连接 / API Key、QQ 账号与白名单、运行节奏、记忆 / 浏览器 / 天气等运行参数、Type0 自动同步（`presetSync`）。
+- 内容字段在配置页已隐藏（`invisible`），仅作「未在 WebUI 配置时的回退默认值」；WebUI 内容会在每次读取配置时叠加，改动即时生效。
+- 数据落在 `data/plugin_data/astrbot_plugin_hds_interlude/content.json`，原子写入；删除该文件即回到配置页回退值。
+
+### 页面结构
+
+| 页面 | 路由 | 内容 |
+| --- | --- | --- |
+| 概览 | `#/overview` | 当前角色、工作区统计、最近更新、三步引导 |
+| 角色身份 | `#/characters` | 角色卡网格：筛选（全部/手动/Type0/酒馆）、设为当前、复制、删除、导出 |
+| 角色编辑器 | `#/characters/:id` | 标签页「身份 / 对话 / 提示词 / HDS 映射 / 提示词预览」+ 侧栏实时预览 |
+| 世界书 | `#/lorebooks` | 世界书列表；编辑器含条目表、搜索、条目抽屉 |
+| 叙事提示词 | `#/prompts` | 全局文风 / 主叙事 / 压缩 / Alter 提示词，一键恢复默认 |
+| 故事绑定 | `#/binding` | 默认角色与世界书、按故事覆盖、「应用到故事」 |
+| 导入中心 | `#/import` | Type0、手动填写、文件导入（JSON/PNG/World Info） |
+
+### 字段清单
+
+**角色卡**（酒馆 V2 对齐，`data` 平铺存储）：
+
+| 分组 | 字段 |
+| --- | --- |
+| 身份 | `name*`、`description`、`personality`、`scenario`、`tags`、`creator`、`character_version`、`creator_notes`、`avatar` |
+| 对话 | `first_mes`、`alternate_greetings`、`mes_example` |
+| 提示词 | `system_prompt`、`post_history_instructions` |
+| HDS 映射 | `perspective`、`perspectives`、`supplementaryFacts`、`userProfile`、`relationship`、`world`、`supportingCast`、`location`、`style`、`timezone` |
+| 元信息 | `id`、`source{type,code,title,revision}`、`createdAt`、`updatedAt`、`character_book` |
+
+**世界书条目**：`comment`、`keys`、`secondary_keys`、`content*`、`enabled`、`constant`、`selective`、`selectiveLogic`（AND ANY / NOT ALL / NOT ANY / AND ALL）、`insertion_order`、`position`（角色设定前/后）、`probability`、`depth`、`role`、`group`、`case_sensitive`、`match_whole_words`、`use_regex`。
+
+**叙事提示词**：`stylePrompt`、`mainPrompt`、`fixedPrompt`、`formatPrompt`、`mainPromptOverride`、`compactionMainPrompt/FixedPrompt/StylePrompt`、`alterPrompt`。
+
+### 新建角色的下拉交互流程
+
+「新建角色」向导顶部为来源下拉框，两档：
+
+1. **手动填写**：填写角色名（必填）、标签、描述、性格、场景 → 点击「创建并编辑」→ 进入角色编辑器继续补全。
+2. **Type0 导入**：
+   1. 填分享站地址（默认 `https://typ0.space`）与分享码 / 完整链接；
+   2. 点击「连接并预览」→ 后端直连分享站，返回预设标题、分享码、revision、映射表与警告；
+   3. 预览面板展示映射摘要（角色名、描述字数、视角数、补充事实数、世界书条目数）；
+   4. 点击「导入并设为当前」→ 生成角色卡并设为当前角色，跳转到编辑器。
+
+### Type0 数据获取与自动填充逻辑
+
+- **获取**：复用 `core/share_sync.fetch_share()`，按 `/api/preset/<code>`、`/api/presets/<code>`、`/api/share/<code>` 依次回退；连接类敏感字段（`apiKey`/`token`/`proxyAgent` 等）在拉取后即被清洗，不会入库。
+- **映射**（`storyDefaults` → 角色卡）：
+
+| Type0 字段 | 角色卡字段 |
+| --- | --- |
+| `characterName` | `name` |
+| `characterProfile` | `description` |
+| `perspective` / `perspectives` | `hds.perspective` / `hds.perspectives` |
+| `supplementaryFacts` | `hds.supplementaryFacts` |
+| `world` | `scenario` + `hds.world` |
+| `supportingCast` | `hds.supportingCast` |
+| `location` / `relationship` / `userProfile` / `style` / `timezone` | 同名 `hds.*` |
+| 预设 `title` / `code` / `revision` | `creator_notes` / `source` |
+
+- **世界书**：若预设含 `worldBook` / `lorebook` / `worldInfo` 分区则一并归一导入；否则提示「该预设不含世界书，可手动补充」。
+- **去重**：`perspective` 会并入 `perspectives`；`characterProfile` 若与 `personality` 重叠，注入时自动去重；`world` 优先于 `scenario` 回填故事设定。
+
+### 注入规则（运行时）
+
+- 角色卡的 `name / description / personality / scenario / perspective(s) / world / supportingCast / location / style / timezone` 映射为 `storyDefaults`，在创建故事与每次读取配置时生效。
+- `system_prompt`、`post_history_instructions`、`mes_example` 与「激活的世界书条目」作为独立块注入主叙事系统提示词；`mes_example` 明确要求不得照抄。
+- 世界书按关键词/常驻激活，受字符预算裁剪（默认 6000），`position` 目前统一注入（before/after 已保留字段，供后续细分）。
+
+---
+
 ## 1. 它和普通角色扮演插件有什么不同
 
 - **时间是真的**。故事有自己的时区、本地时间、星期和日照；每次写作都知道"现在是周四下午四点，天还亮着"。
@@ -187,7 +282,7 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 ## 3. 快速开始（三步）
 
 1. **配模型**：打开插件配置的「模型中心」`model`，把 `providersJson` 填成一段 JSON 数组（见下节示例），给连接勾上 `useForMain`（主叙事）。初次部署至少配一条主叙事连接；想要后台压缩与情绪分析，再勾上 `useForCompaction` / `useForAlter`。
-2. **配故事**：「故事档案」`storyDefaults` 填主角名、角色设定、世界设定、时区。
+2. **配角色**：打开 WebUI「角色工作室」→「角色身份」，手动填写或从 Type0 导入一张角色卡并设为当前；需要世界观细节时再建一本世界书。
 3. **说第一句话**：「QQ 接入」`onebot` 里把 `enabled` 打开、`userAccountsJson` 加上你的 QQ，然后私聊机器人；或在 `runtime` 打开 `autoCreate`，第一次私聊自动建故事。
 
 故事跑起来后不用管。后台每 5 分钟扫一遍：补写生活、兑现到期意图、投递延迟消息、整理记忆、审查日程。
@@ -201,6 +296,7 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 ## 4. 配置说明
 
 配置页共 22 个分组，与上游 Console 的 21 组一一对应（`mainPromptOverride` 为移植版新增的顶层主提示词覆盖）。
+**注意**：角色身份、世界设定与叙事提示词等「内容」已迁到 WebUI「角色工作室」，配置页中的同名字段已隐藏并仅作回退默认值（见上文 WebUI 章节）。
 **注意**：AstrBot 配置页会把"对象行列表"（白名单、连接池）退化为字符串数组控件。
 本插件为此为每类对象列表提供了等价的 `*Json` 文本域，**优先级高于行列表**，推荐直接填写：
 

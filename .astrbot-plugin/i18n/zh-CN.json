@@ -1,0 +1,12 @@
+{
+  "views": {
+    "studio": {
+      "title": "角色工作室",
+      "description": "集中管理角色身份、世界书与叙事提示词；支持 Type0 导入与酒馆格式。",
+      "heading": "角色工作室",
+      "save": "保存",
+      "import": "导入",
+      "new_character": "新建角色"
+    }
+  }
+}

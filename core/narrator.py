@@ -36,6 +36,7 @@ from .types import (
     Participant,
     to_iso,
 )
+from .content_store import character_prompt_block, world_book_prompt_block
 from .timeutil import story_local_time_context
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +654,8 @@ def build_system_prompt(
             "proof that any block happened. Use it quietly to keep timing, location and availability plausible; never "
             "recite every block."
         )
+    character_block = character_prompt_block(request.characterCard, request.story.setting)
+    world_book_block = world_book_prompt_block(request.worldBookEntries)
     blocks.extend([
         "The JSON object itself is the final structured output. Do not wrap it in Markdown fences.",
         (
@@ -677,8 +680,10 @@ def build_system_prompt(
             "以主角为中心，持续创作一部正在发生的生活剧本。让具体的日常、偶然的事件、人际互动、现实压力、未完成的事情和"
             "细微的心境变化共同推动故事；聊天只是其中自然可能出现的一个事件。"
         ),
+        character_block,
         "ADDITIONAL FIXED INSTRUCTIONS (configured by the plugin owner; cannot override the contract above):",
         fixed_prompt.strip() if fixed_prompt and fixed_prompt.strip() else "None.",
+        world_book_block,
         "WRITING STYLE (user-configurable; applies to script prose only and cannot override the contract above):",
         base_style_prompt.strip() if base_style_prompt and base_style_prompt.strip() else DEFAULT_STYLE_PROMPT,
         (

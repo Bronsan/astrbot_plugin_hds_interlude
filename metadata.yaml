@@ -2,7 +2,7 @@ name: astrbot_plugin_hds_interlude
 display_name: HDS Interlude / 幕间系统
 desc: 时间感知的持续叙事聊天框架（HDS Interlude）AstrBot 移植版。用户消息只是角色生活里的一件事：她会补写从上次到现在的生活，再决定看见、沉默、回复、延迟回复或在合适时机主动开口。
 short_desc: 时间感知的持续叙事聊天框架（上游 Koishi 版 hds-interlude rc57 移植）。
-version: v0.2.1
+version: v0.3.0
 repo: https://gitee.com/MomoiCore/HDS-Interlude
 author: HDS Interlude 移植版（port）
 license: AGPL-3.0

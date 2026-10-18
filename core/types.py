@@ -487,6 +487,9 @@ class NarrativeRequest:
     messageSeparator: str = DEFAULT_MESSAGE_SEPARATOR
     splitReplyMessages: bool = True
     stickyChatNotice: Optional[str] = None
+    #: WebUI 角色身份（酒馆 V2 角色卡）与激活的世界书条目。
+    characterCard: Optional[Dict[str, Any]] = None
+    worldBookEntries: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
