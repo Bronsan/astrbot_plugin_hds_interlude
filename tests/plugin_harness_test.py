@@ -425,6 +425,53 @@ async def main() -> None:
             (plugin.service.load_preset_sync_snapshot() or {}).get("revision") == "r1",
             str(plugin.service.load_preset_sync_snapshot()),
         )
+
+        # 19) 插件页路由注册与动作分发（WebUI 真实入口）
+        from astrbot.api import web as web_stub
+
+        route = plugin.context.web_apis.get("/astrbot_plugin_hds_interlude/studio/action")
+        check("WebUI 路由已注册", route is not None, str(list(plugin.context.web_apis)))
+        if route is not None:
+            try:
+                web_stub.request.payload = {"action": "state.get", "payload": {}}
+                response = await route["handler"]()
+                check(
+                    "WebUI 路由 state.get",
+                    isinstance(response, dict)
+                    and response.get("status") == "ok"
+                    and "characters" in (response.get("data") or {}),
+                    str(response)[:200],
+                )
+
+                web_stub.request.payload = {
+                    "action": "character.save",
+                    "payload": {"character": {"name": "路由角色"}},
+                }
+                saved_response = await route["handler"]()
+                check(
+                    "WebUI 路由 character.save",
+                    ((saved_response.get("data") or {}).get("character") or {}).get("name")
+                    == "路由角色",
+                    str(saved_response)[:200],
+                )
+
+                web_stub.request.payload = {"action": "nope", "payload": {}}
+                bad_action = await route["handler"]()
+                check(
+                    "WebUI 路由错误信封",
+                    bad_action.get("status") == "error" and bad_action.get("statusCode") == 404,
+                    str(bad_action)[:160],
+                )
+
+                web_stub.request.payload = "not-a-dict"
+                bad_body = await route["handler"]()
+                check(
+                    "WebUI 路由拒绝非对象请求",
+                    bad_body.get("status") == "error" and bad_body.get("statusCode") == 400,
+                    str(bad_body)[:160],
+                )
+            finally:
+                web_stub.request.payload = {}
     finally:
         await plugin.terminate()
 

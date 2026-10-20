@@ -60,7 +60,7 @@ from .core.timeutil import format_log_time, format_story_display_time
 from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "v0.3.0"
+PLUGIN_VERSION = "v0.3.1"
 
 #: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
 TRANSPORT_TIMEOUT_SECONDS = 30
@@ -1925,9 +1925,14 @@ class HDSInterludePlugin(Star):
             return False, "revision 未变化，跳过"
         sections = sync.get("sections") or []
         selected = [section for section in info["sections"] if not sections or section in sections]
-        patch = build_config_patch(self._config_view(), info["payload"], [section for section in selected if section != "storyDefaults"], include_story_defaults=False)
-        if "storyDefaults" in selected and not sync.get("applyToCurrentStory"):
-            patch["storyDefaults"] = (info["payload"] or {}).get("storyDefaults")
+        # `storyDefaults` 属于内容型数据，已迁至 WebUI 内容库，不再写回配置页；
+        # 需要落到当前故事时仍走下方 applyToCurrentStory 分支。
+        patch = build_config_patch(
+            self._config_view(),
+            info["payload"],
+            [section for section in selected if section != "storyDefaults"],
+            include_story_defaults=False,
+        )
         if patch:
             self._apply_config_patch(patch)
         if sync.get("applyToCurrentStory") and isinstance((info["payload"] or {}).get("storyDefaults"), dict):

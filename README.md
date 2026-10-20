@@ -8,7 +8,7 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.0`，AstrBot `>=4.16,<5`
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.1`，AstrBot `>=4.16,<5`
 - **依赖插件（必需）**：`astrbot_plugin_image_caption_cache` `v1.3.1`
   —— 必须使用仓库根目录的 **`astrbot_plugin_image_caption_cache_v1.3.1.zip`** 安装，
   不能使用插件市场的上游 1.3.0。上游补丁未适配 AstrBot 4.28+ 的 `image_ref` /
@@ -18,20 +18,22 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 
 ---
 
-## 版本与本次更新（v0.3.0 / WebUI 角色工作室）
+## 版本与本次更新（v0.3.1 / 配置页清理与 WebUI 测试接口）
 
-本版新增插件可视化视图「**角色工作室**」，把内容型配置迁出 AstrBot 配置页，并首次内置 Type0 导入。
+本版在 v0.3.0「角色工作室」基础上做两件事：**把配置页中残留的内容字段彻底移除**，并**补齐可在普通浏览器中运行的独立测试接口**，用于验证 WebUI 与后端动作层的完整调用链。
 
 | 修改对象 | 修改内容 | 预期效果 |
 | --- | --- | --- |
-| 新增 `views/studio/` + `core/content_store.py` + `core/studio_api.py` | WebUI 管理角色身份（酒馆 V2 角色卡）、世界书（World Info）、叙事提示词与故事绑定 | 内容改动即时生效，无需重载插件 |
-| `_conf_schema.json` | `storyDefaults`、`model.*Prompt`、`alterSystem.prompt`、`mainPromptOverride` 标记 `invisible`，仅保留为回退默认值 | 配置页只保留 API Key、模型连接、平台账号与运行参数 |
+| `_conf_schema.json` | 移除 `storyDefaults`、`mainPromptOverride`、`model.*Prompt`、`compaction.*Prompt`、`alterSystem.prompt` 共 10 个内容字段 | 配置页不再包含或展示任何 WebUI 入口/内容配置项，只保留连接、平台与运行参数 |
+| `core/studio_api.py` | 修复 `story.apply` 对同步 `store.bind_story()` 的误用 `await` | 「应用到故事」链路可用，不再返回 500 |
+| `tests/studio_test_server.py` | 新增独立测试接口：真实内容库/动作层 + 静态托管 + AstrBot bridge 注入 | 浏览器直接打开即可跑通 WebUI，无需 AstrBot |
+| `tests/webui_http_test.py` | 新增 63 项 HTTP 端到端测试 | 覆盖静态资源、前端 action 覆盖、全业务链路、错误信封与重启持久化 |
 | Type0 导入 | 下拉选择「手动填写 / Type0 导入」；Type0 直连分享站拉取 `storyDefaults` 并自动映射 | 一键填充角色身份与世界设定，无需桌面端 |
 | 酒馆格式 | 支持 V2/V1 JSON、PNG `chara` 数据块、World Info JSON 的导入与导出 | 与 SillyTavern 生态互通 |
 
-核心叙事与投递逻辑**不变**；原有 181 项测试全部通过，新增 WebUI 离线测试（见 [WebUI 章节](#webui-角色工作室)）。
+核心叙事与投递逻辑**不变**；现有 137 + 51 项回归、WebUI 内容层与 HTTP 端到端 63 项全部通过（见 [WebUI 章节](#webui-角色工作室)）。
 
-页面结构、字段清单、下拉交互与 Type0 映射详见下文「WebUI 角色工作室」。
+v0.3.0 的「角色工作室」页面结构、字段清单、下拉交互与 Type0 映射详见下文。
 
 ---
 
@@ -112,7 +114,7 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 | 修复对象 | 原受阻原因 | 本次实现 | 预期行为 |
 | --- | --- | --- | --- |
-| `mainPromptOverride` | 顶层配置从未被读取 | `narrator.decide` 在 `model.mainPrompt` 为空时读取顶层覆盖 | 设置后进入系统提示词；留空回退内置默认 |
+| `mainPromptOverride` | 内容层字段此前未被读取 | `narrator.decide` 在 `model.mainPrompt` 为空时读取 WebUI 内容层写入的顶层覆盖 | 设置后进入系统提示词；留空回退内置默认 |
 | 群回合缓冲 | 按 `storyId` 聚合，多群互相覆盖 | 键改为 `(storyId, groupId)`；每故事一把串行锁；群刷写只等私聊回合，不等其它群 | 两个群同时说话各自合并、各自回复；顺带修复了群批次互相等待导致永不刷写的死锁 |
 | 端点路由 | 只写注册表，投递固定用 `participant.channelId` | 入站登记 `umo`/账号到端点表并记录 `preferredEndpointId`；投递、分段、延迟消息统一走端点 | 同一用户换账号/适配器后，消息从最近一次真实会话发出 |
 | QQ 原生小表情 | 账本有 segment，无投递 | `Face` 组件投递 + 语义→face id 映射 + `allowedNativeFaces` 校验 | 允许的表情真实发出；未登记语义标记 `cancelled` 并写原因 |
@@ -167,8 +169,28 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 - **WebUI 管理**：角色身份（角色卡）、世界书、叙事提示词、故事绑定。
 - **配置页保留**：模型连接 / API Key、QQ 账号与白名单、运行节奏、记忆 / 浏览器 / 天气等运行参数、Type0 自动同步（`presetSync`）。
-- 内容字段在配置页已隐藏（`invisible`），仅作「未在 WebUI 配置时的回退默认值」；WebUI 内容会在每次读取配置时叠加，改动即时生效。
-- 数据落在 `data/plugin_data/astrbot_plugin_hds_interlude/content.json`，原子写入；删除该文件即回到配置页回退值。
+- 内容字段已从配置页 schema 移除，配置页不再展示任何角色/世界书/提示词入口；WebUI 内容会在每次读取配置时叠加，改动即时生效。
+- 数据落在 `data/plugin_data/astrbot_plugin_hds_interlude/content.json`，原子写入；删除该文件即清空 WebUI 内容，叙事回退到内置默认值。
+
+### 独立测试接口（无需 AstrBot）
+
+`tests/studio_test_server.py` 用真实 `ContentStore` + `StudioAPI` 托管同一套 `views/studio/` 静态资源，并向页面注入 AstrBot bridge shim（`window.AstrBotPluginView.apiPost`），因此可以在普通浏览器里直接跑通整条调用链：
+
+```bash
+python tests/studio_test_server.py --port 8787
+# 打开 http://127.0.0.1:8787/
+```
+
+- `GET /`、`/app.js`、`/style.css`：静态资源（`index.html` 自动注入 bridge）；
+- `POST /studio/action`（以及 `POST /astrbot_plugin_hds_interlude/studio/action`）：与插件页一致的动作信封；
+- `GET /healthz`：健康检查；
+- `--data-dir` 指定内容库目录（默认临时目录），`--type0-fixture` 提供离线 Type0 预览/导入数据。
+
+自动化验证：
+
+```bash
+python tests/webui_http_test.py   # 63 项：静态资源 + 前端 action 覆盖 + 全业务链路 + 错误信封 + 重启持久化
+```
 
 ### 页面结构
 
@@ -295,8 +317,8 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 ## 4. 配置说明
 
-配置页共 22 个分组，与上游 Console 的 21 组一一对应（`mainPromptOverride` 为移植版新增的顶层主提示词覆盖）。
-**注意**：角色身份、世界设定与叙事提示词等「内容」已迁到 WebUI「角色工作室」，配置页中的同名字段已隐藏并仅作回退默认值（见上文 WebUI 章节）。
+配置页共 20 个分组，只保留连接、平台账号与运行参数等非内容项（内容型分组已迁至 WebUI）。
+**注意**：角色身份、世界设定与叙事提示词等「内容」只在 WebUI「角色工作室」中维护；配置页 schema 已移除这些字段，不再展示任何 WebUI 入口或同名配置项（见上文 WebUI 章节）。
 **注意**：AstrBot 配置页会把"对象行列表"（白名单、连接池）退化为字符串数组控件。
 本插件为此为每类对象列表提供了等价的 `*Json` 文本域，**优先级高于行列表**，推荐直接填写：
 
@@ -521,7 +543,7 @@ interlude.status        /interlude.status        interlude status
 - `[管理员注记]` 与 `[世界事件]` 的权威性条款。
 
 未逐字迁移的部分（家族特化块、payload 顺序重排、恢复措辞的全部变体）不影响协议与行为边界；
-`mainPromptOverride` / `model.mainPrompt` 等配置可用于补充自定义指令。
+WebUI「角色工作室 → 叙事提示词」中的 `mainPromptOverride` / `mainPrompt` 可用于补充自定义指令。
 
 ### 6.3 AstrBot 原生能力利用
 
@@ -585,8 +607,10 @@ interlude.status        /interlude.status        interlude status
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 135 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
-python tests/plugin_harness_test.py  # 入口层 46 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面（AstrBot 桩）
+python tests/smoke_test.py           # 核心层 137 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
+python tests/plugin_harness_test.py  # 入口层 51 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面/WebUI 路由注册（AstrBot 桩）
+python tests/webui_test.py           # WebUI 内容层：角色卡/世界书/Type0/PNG/内容库/动作层
+python tests/webui_http_test.py      # WebUI HTTP 端到端 63 项：测试接口与页面调用链
 ```
 
 ## 11. 许可与致谢

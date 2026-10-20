@@ -4314,7 +4314,7 @@ class InterludeService:
         blockers: List[str] = []
         warnings: List[str] = []
         if not defaults.get("characterName"):
-            blockers.append("storyDefaults.characterName 未填写。")
+            blockers.append("角色身份未配置：请在「角色工作室」创建并启用角色。")
         if not main_providers:
             blockers.append("模型中心没有勾选「用于主叙事」的连接。")
         elif not main_providers[0].model or not resolve_connection_endpoint_safe(main_providers[0]):

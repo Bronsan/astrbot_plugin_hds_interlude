@@ -335,7 +335,7 @@ class StudioAPI:
             raise StudioError("缺少 storyId")
         patch = story_setting_patch_from_card(card)
         await self._story_applier(story_id, patch)
-        await self.store.bind_story(
+        self.store.bind_story(
             story_id,
             card.get("id") or "",
             payload.get("lorebookIds") if isinstance(payload.get("lorebookIds"), list) else None,

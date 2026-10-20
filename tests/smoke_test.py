@@ -709,7 +709,29 @@ def test_schema_defaults() -> None:
     with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"), encoding="utf-8") as handle:
         schema = json.load(handle)
     runtime = schema["runtime"]["items"]
-    check("schema 默认文风与常量一致", schema["model"]["items"]["stylePrompt"]["default"] == DEFAULT_STYLE_PROMPT, "")
+    removed_paths = [
+        ("storyDefaults",),
+        ("mainPromptOverride",),
+        ("model", "items", "mainPrompt"),
+        ("model", "items", "formatPrompt"),
+        ("model", "items", "fixedPrompt"),
+        ("model", "items", "stylePrompt"),
+        ("model", "items", "compaction", "items", "mainPrompt"),
+        ("model", "items", "compaction", "items", "fixedPrompt"),
+        ("model", "items", "compaction", "items", "stylePrompt"),
+        ("alterSystem", "items", "prompt"),
+    ]
+
+    def has_path(node, path):
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return False
+            node = node[key]
+        return True
+
+    check("配置页已移除全部内容字段", not any(has_path(schema, path) for path in removed_paths), "")
+    check("配置页无 WebUI 措辞", "WebUI" not in json.dumps(schema, ensure_ascii=False), "")
+    check("内置默认文风仍可用", bool(DEFAULT_STYLE_PROMPT.strip()), "")
     check("schema contextEntryLimit=17", runtime["contextEntryLimit"]["default"] == 17, str(runtime["contextEntryLimit"]["default"]))
     check("schema contextTimeWindowMinutes=6", runtime["contextTimeWindowMinutes"]["default"] == 6, "")
     check("schema maxScriptCharacters=1400", runtime["maxScriptCharacters"]["default"] == 1400, "")

@@ -12,6 +12,7 @@ class Context:
     def __init__(self):
         self.sent: list[tuple[str, Any]] = []
         self.platform_inst = None
+        self.web_apis: dict[str, dict[str, Any]] = {}
 
     async def send_message(self, umo: str, chain: Any) -> bool:
         self.sent.append((umo, chain))
@@ -19,6 +20,13 @@ class Context:
 
     def get_platform_inst(self, platform_id: str):
         return self.platform_inst
+
+    def register_web_api(self, path: str, handler: Any, methods: Any = None, description: str = "") -> None:
+        self.web_apis[path] = {
+            "handler": handler,
+            "methods": list(methods or []),
+            "description": description,
+        }
 
 
 class Star:

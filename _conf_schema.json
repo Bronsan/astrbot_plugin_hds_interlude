@@ -1,6 +1,6 @@
 {
   "presetSync": {
-    "description": "【预设入口】Type0 预设：插件加载时直连分享站拉取角色人设/配置，不依赖桌面端。",
+    "description": "【预设入口】Type0 预设：插件加载时直连分享站拉取预设；配置分区写回配置，角色人设仅在勾选“应用到当前故事”时写入当前故事。",
     "type": "object",
     "items": {
       "enabled": {
@@ -29,83 +29,16 @@
         "default": false
       },
       "sections": {
-        "description": "要同步的分区（留空 = 预设里有什么就同步什么）。可选：storyDefaults（配合“应用到当前故事”）、runtime、urge、agency、memory、alterSystem、schedulePreplan、timelineDirector、chatActions、stickers、sharedStory、browser、worldSeeder、weather、longHorizon、qzone、blindMode、logging。",
+        "description": "要同步的分区（留空 = 预设里有什么就同步什么）。可选：storyDefaults（仅在勾选“应用到当前故事”时生效）、runtime、urge、agency、memory、alterSystem、schedulePreplan、timelineDirector、chatActions、stickers、sharedStory、browser、worldSeeder、weather、longHorizon、qzone、blindMode、logging。",
         "type": "list",
         "default": []
       },
       "applyToCurrentStory": {
-        "description": "同时把 storyDefaults 应用到当前运行中的故事。",
+        "description": "同时把 storyDefaults 应用到当前运行中的故事（不写回配置页）。",
         "type": "bool",
         "default": false
       }
     }
-  },
-  "storyDefaults": {
-    "description": "【已迁移至 WebUI】故事档案：主角、世界、关系、地点、时区等在 WebUI「角色工作室 → 角色身份 / 世界书」中管理；此处仅作未配置 WebUI 时的回退默认值。",
-    "type": "object",
-    "items": {
-      "characterName": {
-        "description": "主角名称。",
-        "type": "string",
-        "default": "Unnamed character"
-      },
-      "characterProfile": {
-        "description": "主角身份、性格、作息、习惯、压力和行为边界。",
-        "type": "text",
-        "default": ""
-      },
-      "perspective": {
-        "description": "主角个体价值观 / 看待世界的方式（独立于 Canon 的外壳人格层）。",
-        "type": "text",
-        "default": ""
-      },
-      "perspectives": {
-        "description": "多条独立价值观/视角（每条一段，作为独立条目注入）。",
-        "type": "list",
-        "default": []
-      },
-      "supplementaryFacts": {
-        "description": "补充事实（复杂的世界/人物/关系事实），作为初始长期事实注入。",
-        "type": "list",
-        "default": []
-      },
-      "userProfile": {
-        "description": "没有账号专属资料时使用的默认用户背景。",
-        "type": "text",
-        "default": ""
-      },
-      "relationship": {
-        "description": "新参与者与主角的默认初始关系。",
-        "type": "text",
-        "default": ""
-      },
-      "world": {
-        "description": "故事时代、地点与现实规则。",
-        "type": "text",
-        "default": ""
-      },
-      "supportingCast": {
-        "description": "配角及其与主角的关系；无配角可留空。",
-        "type": "text",
-        "default": ""
-      },
-      "location": {
-        "description": "主角主要活动地点。",
-        "type": "string",
-        "default": ""
-      },
-      "style": {
-        "description": "故事级叙事文风（优先于全局 stylePrompt）。",
-        "type": "text",
-        "default": "现实主义日常叙事，情绪克制，关系变化缓慢而具体。"
-      },
-      "timezone": {
-        "description": "IANA 时区，例如 Asia/Shanghai。",
-        "type": "string",
-        "default": "Asia/Shanghai"
-      }
-    },
-    "invisible": true
   },
   "model": {
     "description": "【必填 2】模型中心：连接、用途路由与主叙事参数。",
@@ -179,30 +112,6 @@
             "default": 5
           }
         }
-      },
-      "mainPrompt": {
-        "description": "主叙事创作方向（高级，一般留空使用内置默认）。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-        "type": "text",
-        "default": "",
-        "invisible": true
-      },
-      "formatPrompt": {
-        "description": "结构化输出补充规则。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-        "type": "text",
-        "default": "",
-        "invisible": true
-      },
-      "fixedPrompt": {
-        "description": "所有故事通用的长期约束。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-        "type": "text",
-        "default": "",
-        "invisible": true
-      },
-      "stylePrompt": {
-        "description": "全局叙事文风；故事级 style 可进一步覆盖。默认为完整的生活剧本写作指引（2026-10-15 起，对齐上游 rc54）。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-        "type": "text",
-        "default": "你正在持续创作一部以主角为中心的现实主义生活剧本，每次推进约400多字，可长可短，重点展现变化。\n\n每次写作时，请先感受主角在这段真实时间里正在经历怎样的生活：她的日程、行动、身体状态、心情、环境、正在处理的事情，以及与周围人物之间自然流动的关系。让剧本从这些真实而具体的生活质感中展开。\n\n用户消息是发生在当前时刻的一项外部事件。把它自然放入（如没有注意到/无条件注意也可不放入）主角原本正在继续的现实中，结合她当下的处境、注意力、情绪和人与人之间的关系，呈现这条消息带来的影响。主角可以很快注意到，也可以在完成手头的事、与别人相处、整理情绪或改变计划后才处理它。\n\n为当前时间段补充一些属于主角自己的生活内容，例如丰富感的日常事务、与身边人的小互动、工作或学业、兴趣、身体感受、心理想法、偶遇、配角互动、临时变化、尚未解决的小事、环境细节或内在念头。让这些内容与既有剧情保持因果和连续性，并自然留下后续的空间。\n\n鼓励生活保留适度的不确定性与变化：突变可能发生，计划可能调整，邀约可能出现，配角能带来新的情绪或信息，旧问题也可能以平静的方式重新浮现。事件保持克制、可信，并让主角的选择具有现实动机。\n\n主角遇到有意思与想要分享/诉苦的事情，完全可以选择主动联系熟悉的用户。\n\n采用贴近主角的第三人称限知视角，一部持续上演的话剧。外部事件丰富度高、叙事连贯，关注主角心理、具体行动、人物来往、情绪余波与关系的缓慢变化。\n\n叙事推进至当前时刻结束。可以保留正在进行的事情、未说出口的念头、尚未解决的关系线索和未来意图；请将已经发生的内容写得完整而自然。\n\n主角线上聊天喜欢用简洁和省字数的方式交流。",
-        "invisible": true
       },
       "vision": {
         "description": "图片理解：native 直接随主请求送图并支持 detail/maxImageDimension；sidecar 用独立视觉连接转事实观察。",
@@ -361,24 +270,6 @@
               "prompt-only"
             ],
             "default": "json-object"
-          },
-          "mainPrompt": {
-            "description": "压缩任务指令。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-            "type": "text",
-            "default": "Compress completed scenes into concise continuity notes while preserving causality, promises, unresolved matters, and gradual character change.",
-            "invisible": true
-          },
-          "fixedPrompt": {
-            "description": "压缩器长期规则。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-            "type": "text",
-            "default": "",
-            "invisible": true
-          },
-          "stylePrompt": {
-            "description": "压缩结果表达风格。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-            "type": "text",
-            "default": "Concise, factual, chronological, and concrete.",
-            "invisible": true
           }
         }
       }
@@ -1216,12 +1107,6 @@
         "description": "侧端分析超时（毫秒）。",
         "type": "int",
         "default": 30000
-      },
-      "prompt": {
-        "description": "侧端分析的附加要求。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-        "type": "text",
-        "default": "",
-        "invisible": true
       }
     }
   },
@@ -1482,11 +1367,5 @@
         "default": 500
       }
     }
-  },
-  "mainPromptOverride": {
-    "description": "高级：系统主提示词的顶层覆盖，优先级高于「模型中心 → mainPrompt」；留空使用内置默认。（已迁移至 WebUI「角色工作室」，此处仅作回退默认值）",
-    "type": "text",
-    "default": "",
-    "invisible": true
   }
 }
