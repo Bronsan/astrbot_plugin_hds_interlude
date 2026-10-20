@@ -8,13 +8,44 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.1`，AstrBot `>=4.16,<5`
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.2`，AstrBot `>=4.16,<5`
 - **依赖插件（必需）**：`astrbot_plugin_image_caption_cache` `v1.3.1`
   —— 必须使用仓库根目录的 **`astrbot_plugin_image_caption_cache_v1.3.1.zip`** 安装，
   不能使用插件市场的上游 1.3.0。上游补丁未适配 AstrBot 4.28+ 的 `image_ref` /
   `montage_refs` 签名，会在引用图片转述时抛 `unexpected keyword argument`；
   本仓库的 1.3.1 修复版同时兼容 AstrBot 4.16–4.29，详见 [第 2 节](#2-安装)。
 - 依赖库：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
+
+---
+
+## 版本与本次更新（v0.3.2 / 修复版本更新提示）
+
+本版修复 AstrBot「检测不到新版本、每次升级都要卸载重装」的问题。
+
+| 修改对象 | 修改内容 | 预期效果 |
+| --- | --- | --- |
+| `metadata.yaml` | `repo` 改为本插件 GitHub 仓库；`version` 改为语义化 `0.3.2`（去掉 `v`）；`author` 改为 `Bronsan`；新增 `social_link` | AstrBot 能按仓库 / 作者+名称匹配到插件并正确比较版本 |
+| `plugin_registry.json` + `plugin_registry-md5.json` | 新增可自托管的插件市场源（含本插件条目） | 未上架官方市场时也能收到更新提示 |
+| `tests/smoke_test.py` | 新增 metadata 更新契约测试（9 项） | 防止 `repo` / `version` / 市场源再次回归 |
+
+**根因**：AstrBot 前端的 `checkUpdate` 只对 `install_source.install_method === "market"` 的插件计算 `online_version`；仓库安装会被直接跳过。旧版 `metadata.yaml` 的 `repo` 又指向上游 Koishi 的 Gitee 仓库，且插件未进入官方市场，导致市场匹配不到条目、没有 `online_version`，界面因而不会提示新版本；手动解压/上传安装的插件只有 `implicit` 安装源记录，更新入口还会被直接拒绝。
+
+**修复方式**：
+
+1. 修正 `metadata.yaml`（`repo` / `version` / `author`）。
+2. 官方市场：在 <https://cloud.astrbot.app/publish> 提交本仓库（需 AstrBot Cloud 账号）。
+3. 未上架官方市场时，使用自托管源：
+   - 在「插件管理 → 插件源」添加 `https://raw.githubusercontent.com/Bronsan/astrbot_plugin_hds_interlude/main/plugin_registry.json`；
+   - 在该插件「更换插件源」中选择此源（`install_method=market`）；
+   - 以后发布新版本时同步更新 `plugin_registry.json` 的 `version` 与 `plugin_registry-md5.json` 的 `md5`。
+
+**配置与缓存影响**：
+
+- 安装源记录保存在 AstrBot 全局键值 `plugin_install_sources`（以插件目录名为 key）；手动解压/上传安装的插件没有真实记录，只有 `implicit` 记录，更新入口会被拒绝。
+- 市场数据缓存在 `data/plugins.json`，用 `-md5.json` 校验；`checkUpdate` 默认 `force_refresh=false`，发布新版本后需点「刷新市场」或删除缓存并重启。
+- 市场源不可达时 AstrBot 会回退旧缓存，并提示「使用缓存数据，可能不是最新版本」。
+
+回归：smoke 146 + harness 51 + WebUI 内容层 + HTTP 端到端 63 全部通过。
 
 ---
 
@@ -191,6 +222,10 @@ python tests/studio_test_server.py --port 8787
 ```bash
 python tests/webui_http_test.py   # 63 项：静态资源 + 前端 action 覆盖 + 全业务链路 + 错误信封 + 重启持久化
 ```
+
+### 版本更新与插件市场
+
+自动更新提示依赖 AstrBot 的 `install_method=market` 判定；具体根因、官方发布入口、自托管 `plugin_registry.json` 步骤与缓存刷新方式，见本文开头「版本与本次更新（v0.3.2）」。
 
 ### 页面结构
 
@@ -607,7 +642,7 @@ WebUI「角色工作室 → 叙事提示词」中的 `mainPromptOverride` / `mai
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 137 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端
+python tests/smoke_test.py           # 核心层 146 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端/metadata 更新契约
 python tests/plugin_harness_test.py  # 入口层 51 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面/WebUI 路由注册（AstrBot 桩）
 python tests/webui_test.py           # WebUI 内容层：角色卡/世界书/Type0/PNG/内容库/动作层
 python tests/webui_http_test.py      # WebUI HTTP 端到端 63 项：测试接口与页面调用链

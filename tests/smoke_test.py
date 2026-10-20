@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -740,6 +742,48 @@ def test_schema_defaults() -> None:
     check("schema 预设置顶", next(iter(schema)) == "presetSync", str(next(iter(schema))))
 
 
+def test_metadata_update_contract() -> None:
+    """metadata 必须满足 AstrBot 更新检查约定（repo / 版本 / 作者 / 市场源）。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "metadata.yaml"), encoding="utf-8") as handle:
+        text = handle.read()
+
+    def field(name: str) -> str:
+        match = re.search(rf"^{name}:\s*(.+)$", text, re.MULTILINE)
+        return match.group(1).strip().strip('"').strip("'") if match else ""
+
+    name = field("name")
+    version = field("version")
+    repo = field("repo")
+    author = field("author")
+    check("metadata 名称与目录一致", name == "astrbot_plugin_hds_interlude", name)
+    check(
+        "metadata 仓库指向本插件 GitHub",
+        repo == "https://github.com/Bronsan/astrbot_plugin_hds_interlude",
+        repo,
+    )
+    check("metadata 版本为语义化（无 v 前缀）", bool(re.fullmatch(r"\d+\.\d+\.\d+", version)), version)
+    check("metadata 作者用于市场标识", author == "Bronsan", author)
+    check("metadata 声明 astrbot_version", bool(field("astrbot_version")), field("astrbot_version"))
+
+    with open(os.path.join(root, "plugin_registry.json"), encoding="utf-8") as handle:
+        registry = json.load(handle)
+    entry = registry.get("Bronsan/astrbot_plugin_hds_interlude") or {}
+    check("自托管市场源条目存在", entry.get("name") == name, str(entry)[:120])
+    check(
+        "自托管市场源版本与 metadata 一致",
+        entry.get("version") == version,
+        f"{entry.get('version')} != {version}",
+    )
+    check("自托管市场源 repo 与 metadata 一致", entry.get("repo") == repo, str(entry.get("repo")))
+
+    with open(os.path.join(root, "plugin_registry-md5.json"), encoding="utf-8") as handle:
+        md5_payload = json.load(handle)
+    with open(os.path.join(root, "plugin_registry.json"), "rb") as handle:
+        expected_md5 = hashlib.md5(handle.read()).hexdigest()
+    check("自托管市场源 MD5 与文件一致", md5_payload.get("md5") == expected_md5, str(md5_payload))
+
+
 async def test_wiring_fixes() -> None:
     """本轮修复：提示词覆盖、群缓冲隔离、端点路由、动作投递、时间导演、扫描上限。"""
     tmp = tempfile.mkdtemp()
@@ -1074,6 +1118,7 @@ async def main() -> None:
     test_type0_share_codes()
     test_browser_helpers()
     test_schema_defaults()
+    test_metadata_update_contract()
     await test_turn_engine()
     await test_rc56_alignment()
     await test_rc57_alignment()
