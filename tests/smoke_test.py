@@ -343,7 +343,7 @@ async def test_rc56_alignment() -> None:
     overridden = build_system_prompt(request, "自定义文风：冷静克制。", "", "", "", False, False, "off")
     check("显式文风覆盖默认", "自定义文风：冷静克制。" in overridden and DEFAULT_STYLE_PROMPT not in overridden, overridden[-200:])
     check("分享分区包含 weather", "weather" in SHARE_SECTIONS, str(SHARE_SECTIONS))
-    check("分享分区 18 项", len(SHARE_SECTIONS) == 18, str(len(SHARE_SECTIONS)))
+    check("分享分区 17 项", len(SHARE_SECTIONS) == 17, str(len(SHARE_SECTIONS)))
 
 
 async def test_rc57_alignment() -> None:
@@ -732,14 +732,17 @@ def test_schema_defaults() -> None:
         return True
 
     check("配置页已移除全部内容字段", not any(has_path(schema, path) for path in removed_paths), "")
-    check("配置页无 WebUI 措辞", "WebUI" not in json.dumps(schema, ensure_ascii=False), "")
+    check("配置页无 WebUI 分组", "webui" not in schema and "studio" not in schema, "")
     check("内置默认文风仍可用", bool(DEFAULT_STYLE_PROMPT.strip()), "")
     check("schema contextEntryLimit=17", runtime["contextEntryLimit"]["default"] == 17, str(runtime["contextEntryLimit"]["default"]))
     check("schema contextTimeWindowMinutes=6", runtime["contextTimeWindowMinutes"]["default"] == 6, "")
     check("schema maxScriptCharacters=1400", runtime["maxScriptCharacters"]["default"] == 1400, "")
     check("schema maxMessageCharacters=1500", runtime["maxMessageCharacters"]["default"] == 1500, "")
     check("schema urge advanced 齐全", len(schema["urge"]["items"]["advanced"]["items"]) == 17, "")
-    check("schema 预设置顶", next(iter(schema)) == "presetSync", str(next(iter(schema))))
+    check("schema 模型中心置顶", next(iter(schema)) == "model", str(next(iter(schema))))
+    check("配置页已移除 presetSync", "presetSync" not in schema, "")
+    check("配置页已移除 longHorizon", "longHorizon" not in schema, "")
+    check("memory 不再重复 factLimit", "factLimit" not in schema["memory"]["items"], "")
 
 
 def test_metadata_update_contract() -> None:

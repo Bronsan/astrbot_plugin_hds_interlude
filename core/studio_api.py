@@ -11,7 +11,7 @@ import base64
 import binascii
 import json
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .content_store import (
     ContentError,
@@ -128,6 +128,7 @@ class StudioAPI:
         story_lister: Optional[Callable[[], Awaitable[List[Dict[str, Any]]]]] = None,
         story_applier: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         share_fetcher: Callable[[str, str], Awaitable[Dict[str, Any]]] = fetch_share,
+        preset_runner: Optional[Callable[[bool], Awaitable[Tuple[bool, str]]]] = None,
         default_base: Optional[str] = None,
         logger: Any = None,
     ) -> None:
@@ -135,6 +136,7 @@ class StudioAPI:
         self._story_lister = story_lister
         self._story_applier = story_applier
         self._share_fetcher = share_fetcher
+        self._preset_runner = preset_runner
         self._default_base = default_base or default_share_base()
         self._logger = logger
 
@@ -189,6 +191,7 @@ class StudioAPI:
             "active": self.store.active(),
             "bindings": self.store.bindings(),
             "prompts": self.store.prompts(),
+            "presetSync": self.store.preset_sync(),
             "stories": stories,
             "stats": self.store.stats(),
             "catalog": FIELD_CATALOG,
@@ -306,6 +309,19 @@ class StudioAPI:
             raise StudioError("缺少 prompts 数据")
         saved = self.store.save_prompts(prompts)
         return {"prompts": saved, "state": await self.state()}
+
+    async def action_preset_sync_save(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        settings = payload.get("presetSync")
+        if not isinstance(settings, dict):
+            raise StudioError("缺少 presetSync 数据")
+        saved = self.store.save_preset_sync(settings)
+        return {"presetSync": saved, "state": await self.state()}
+
+    async def action_preset_sync_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._preset_runner:
+            raise StudioError("当前环境不支持立即同步", 501)
+        applied, message = await self._preset_runner(bool(payload.get("force")))
+        return {"applied": applied, "message": message, "state": await self.state()}
 
     # -- 预览与故事 ------------------------------------------------------ #
     async def action_preview_prompt(self, payload: Dict[str, Any]) -> Dict[str, Any]:

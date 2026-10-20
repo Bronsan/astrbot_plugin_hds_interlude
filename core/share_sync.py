@@ -17,7 +17,7 @@ import httpx
 SHARE_SECTIONS = (
     "storyDefaults", "runtime", "urge", "agency", "memory", "alterSystem",
     "schedulePreplan", "timelineDirector", "chatActions", "stickers", "sharedStory",
-    "browser", "worldSeeder", "weather", "longHorizon", "qzone", "blindMode", "logging",
+    "browser", "worldSeeder", "weather", "qzone", "blindMode", "logging",
 )
 
 #: 连接类字段清洗（不进入同步分区）。

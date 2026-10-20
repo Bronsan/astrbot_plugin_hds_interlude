@@ -104,12 +104,17 @@ class StudioTestServer:
             {"id": "story-test-1", "title": "测试故事", "updatedAt": "2026-10-20T00:00:00Z"},
         ]
         self.applied_story_patches: Dict[str, Dict[str, Any]] = {}
+        self.preset_sync_runs: list = []
 
         async def list_stories() -> list:
             return [dict(item) for item in self.stories]
 
         async def apply_story(story_id: str, patch: Dict[str, Any]) -> None:
             self.applied_story_patches[story_id] = dict(patch)
+
+        async def run_preset_sync(force: bool = False):
+            self.preset_sync_runs.append(bool(force))
+            return True, "测试接口：Type0 同步完成"
 
         fixture = self._load_fixture(type0_fixture)
 
@@ -126,6 +131,7 @@ class StudioTestServer:
             self.store,
             story_lister=list_stories,
             story_applier=apply_story,
+            preset_runner=run_preset_sync,
             default_base="https://typ0.space",
             logger=logger,
             **extra,

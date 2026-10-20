@@ -8,13 +8,74 @@ HDS Interlude 是一个**时间感知的持续叙事聊天框架**的 AstrBot �
 你发过去的消息只是这段时间里发生的一件事，她可能马上看见，也可能没看见、不想回、正忙着、晚点再回。
 
 - 上游：Koishi 插件 `hds-interlude` `1.0.1-rc57`（AGPL-3.0）
-- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.2`，AstrBot `>=4.16,<5`
+- 本移植：AstrBot 插件 `astrbot_plugin_hds_interlude` `v0.3.3`，AstrBot `>=4.16,<5`
 - **依赖插件（必需）**：`astrbot_plugin_image_caption_cache` `v1.3.1`
   —— 必须使用仓库根目录的 **`astrbot_plugin_image_caption_cache_v1.3.1.zip`** 安装，
   不能使用插件市场的上游 1.3.0。上游补丁未适配 AstrBot 4.28+ 的 `image_ref` /
   `montage_refs` 签名，会在引用图片转述时抛 `unexpected keyword argument`；
   本仓库的 1.3.1 修复版同时兼容 AstrBot 4.16–4.29，详见 [第 2 节](#2-安装)。
 - 依赖库：`httpx`（模型/网页请求）；`Pillow`、`silk-python` 由 AstrBot 自带（缺失时图片缩放/语音解码自动降级）；数据存储使用标准库 `sqlite3`
+
+---
+
+## 版本与本次更新（v0.3.3 / 配置页与 WebUI 去重）
+
+本版按「配置页只保留 WebUI 缺失的独有功能」重构配置面：配置页从 20 组精简为 **18 组**，Type0 自动同步迁入 WebUI「导入中心」，并清理未使用/重复字段。
+
+### 功能对比与处理
+
+| 功能域 | 配置页 | WebUI | 处理 |
+| --- | --- | --- | --- |
+| 角色身份 / 世界设定 | 无（v0.3.1 已移除 `storyDefaults`） | 角色身份 / 角色编辑器 | 仅 WebUI |
+| 世界书 | 无 | 世界书 | 仅 WebUI |
+| 叙事提示词 | 无（v0.3.1 已移除 prompt 字段） | 叙事提示词 | 仅 WebUI |
+| 故事绑定 | 无 | 故事绑定 | 仅 WebUI |
+| Type0 导入 | 旧 `presetSync` | 导入中心 + 自动同步 | 重复，删除配置组；自动同步迁入 WebUI |
+| 文件导入 / 导出 | 无 | 导入中心 / 角色卡导出 | 仅 WebUI |
+| 模型连接与参数 | `model` | 无 | 保留 |
+| 平台账号与白名单 | `onebot` | 无 | 保留 |
+| 运行时 / 节奏 / 预算 | `runtime` | 无 | 保留 |
+| Urge / 日程 / 时间导演 / 行动窗口 | `urge` / `schedulePreplan` / `timelineDirector` / `agency` | 无 | 保留 |
+| 聊天动作 / 本地表情包 | `chatActions` / `stickers` | 无 | 保留 |
+| 记忆 / Alter 情绪（参数） | `memory` / `alterSystem` | 仅提示词 | 保留参数；提示词在 WebUI |
+| 网页观察 / 世界播种 / 天气 | `browser` / `worldSeeder` / `weather` | 无 | 保留 |
+| 多人共享 / 管理员 | `sharedStory` | 无 | 保留 |
+| QQ 空间 | `qzone` | 无 | 保留（需外部网关） |
+| 盲区 / 日志 | `blindMode` / `logging` | 无 | 保留 |
+| 长线叙事 | `longHorizon` | 无 | 未实现，删除 |
+
+### 删除项
+
+1. `presetSync`（7 项）：Type0 分享码/自动同步与 WebUI 导入中心重复。自动同步设置改存 `content.json`，入口为 WebUI「导入中心 → Type0 自动同步」；旧配置值仍作为回退。
+2. `longHorizon`（4 项）：全仓库无读取，属于未实现的保留项。
+3. `memory.factLimit`（1 项）：无任何读取，且与 `runtime.memoryLimit` 语义重复；统一使用后者。
+
+### 保留项（18 组）
+
+| 分组 | 定位（一句话） |
+| --- | --- |
+| `model` | 模型连接、用途路由、采样/超时、视觉/音频/Embedding 与压缩参数。 |
+| `onebot` | QQ / OneBot 机器人账号、私聊与群聊白名单。 |
+| `sharedStory` | 多人共享主剧本、跨账号动作与管理员权限。 |
+| `runtime` | 消息合并/分段/打字/重试、自动生活推进、上下文预算与休息窗口。 |
+| `urge` | Urge 弹性推进频率、区间与意愿阈值。 |
+| `schedulePreplan` | 近期日程生成、变化颗粒度与审查时间。 |
+| `timelineDirector` | 自动回合的相对时间账本与失败降级。 |
+| `agency` | 行动窗口、主动联系温度、间隔与每日上限。 |
+| `chatActions` | 引用回复、消息回应、原生小表情与表达阈值。 |
+| `stickers` | 本地表情包目录、扫描与描述预算。 |
+| `memory` | 场景压缩、事实召回、设定演化、剧情余波与 Overlay 参数。 |
+| `alterSystem` | Alter 情绪阈值、强度与侧端分析参数。 |
+| `browser` | 网页观察的搜索/访问、域名策略、正文与缓存预算。 |
+| `worldSeeder` | 世界事件播种器的频率、上限与生成参数。 |
+| `weather` | Open-Meteo 真实天气注入与观测点。 |
+| `qzone` | QQ 空间发帖/评论/点赞上限与轮询窗口（需外部网关）。 |
+| `blindMode` | 盲区模式的命令静默与健康心跳。 |
+| `logging` | 日志级别、内容预览与预览长度。 |
+
+配置页不再包含任何角色/世界书/提示词/导入内容；这些统一在 WebUI 维护。
+
+回归：smoke 149 + harness 51 + WebUI 内容层 + HTTP 端到端 68 全部通过。
 
 ---
 
@@ -198,8 +259,8 @@ v0.1.2 的盘点把 15 项列为"未接入/未迁移"。本版优先补齐**不�
 
 ### 定位与边界
 
-- **WebUI 管理**：角色身份（角色卡）、世界书、叙事提示词、故事绑定。
-- **配置页保留**：模型连接 / API Key、QQ 账号与白名单、运行节奏、记忆 / 浏览器 / 天气等运行参数、Type0 自动同步（`presetSync`）。
+- **WebUI 管理**：角色身份（角色卡）、世界书、叙事提示词、故事绑定、Type0 导入/自动同步。
+- **配置页保留**：模型连接 / API Key、QQ 账号与白名单、运行节奏、记忆 / 浏览器 / 天气等运行参数；Type0 自动同步已迁入 WebUI。
 - 内容字段已从配置页 schema 移除，配置页不再展示任何角色/世界书/提示词入口；WebUI 内容会在每次读取配置时叠加，改动即时生效。
 - 数据落在 `data/plugin_data/astrbot_plugin_hds_interlude/content.json`，原子写入；删除该文件即清空 WebUI 内容，叙事回退到内置默认值。
 
@@ -237,7 +298,7 @@ python tests/webui_http_test.py   # 63 项：静态资源 + 前端 action 覆盖
 | 世界书 | `#/lorebooks` | 世界书列表；编辑器含条目表、搜索、条目抽屉 |
 | 叙事提示词 | `#/prompts` | 全局文风 / 主叙事 / 压缩 / Alter 提示词，一键恢复默认 |
 | 故事绑定 | `#/binding` | 默认角色与世界书、按故事覆盖、「应用到故事」 |
-| 导入中心 | `#/import` | Type0、手动填写、文件导入（JSON/PNG/World Info） |
+| 导入中心 | `#/import` | Type0 导入/自动同步、手动填写、文件导入（JSON/PNG/World Info） |
 
 ### 字段清单
 
@@ -642,10 +703,10 @@ WebUI「角色工作室 → 叙事提示词」中的 `mainPromptOverride` / `mai
 不依赖 AstrBot 本体即可运行（核心层不导入 astrbot）：
 
 ```bash
-python tests/smoke_test.py           # 核心层 146 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端到端/metadata 更新契约
+python tests/smoke_test.py           # 核心层 149 项：时间/意愿门/Alter/日程/剧本引擎/调度/投递三态/rc57 Overlay/服务端端到端/metadata 更新契约
 python tests/plugin_harness_test.py  # 入口层 51 项：命令派发/确认流/消息中间件/失明模式/回执超时/rc57 配置面/WebUI 路由注册（AstrBot 桩）
 python tests/webui_test.py           # WebUI 内容层：角色卡/世界书/Type0/PNG/内容库/动作层
-python tests/webui_http_test.py      # WebUI HTTP 端到端 63 项：测试接口与页面调用链
+python tests/webui_http_test.py      # WebUI HTTP 端到端 68 项：测试接口 + 自动同步 + 页面调用链
 ```
 
 ## 11. 许可与致谢

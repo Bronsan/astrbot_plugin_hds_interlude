@@ -221,6 +221,40 @@ def main() -> None:
         check("preview.prompt 映射角色名", defaults.get("characterName") == "测试角色", str(defaults)[:160])
 
         # ---------------------------------------------------------------- #
+        # 6b. Type0 自动同步（WebUI 内配置）
+        # ---------------------------------------------------------------- #
+        status, obj = action(
+            base,
+            "preset.sync.save",
+            {
+                "presetSync": {
+                    "enabled": True,
+                    "baseUrl": "https://example.test",
+                    "shareCode": "ABCD-1234",
+                    "autoUpdate": True,
+                    "sections": ["runtime", "urge"],
+                    "applyToCurrentStory": True,
+                }
+            },
+        )
+        preset = (obj.get("data") or {}).get("presetSync") or {}
+        check("presetSync.save 200/ok", status == 200 and preset.get("enabled") is True, str(obj)[:200])
+        check("presetSync.save 保存分享码", preset.get("shareCode") == "ABCD-1234", str(preset)[:160])
+        check("presetSync.save 保存分区", preset.get("sections") == ["runtime", "urge"], str(preset.get("sections")))
+
+        status, obj = action(base, "preset.sync.run", {"force": True})
+        check(
+            "presetSync.run 200/ok",
+            status == 200 and (obj.get("data") or {}).get("applied") is True,
+            str(obj)[:200],
+        )
+        check(
+            "presetSync.run 传入 force",
+            bool(server.preset_sync_runs) and server.preset_sync_runs[-1] is True,
+            str(server.preset_sync_runs),
+        )
+
+        # ---------------------------------------------------------------- #
         # 7. 导出 / 导入
         # ---------------------------------------------------------------- #
         status, obj = action(base, "export.character", {"id": char_id})

@@ -254,7 +254,7 @@ async def main() -> None:
 
         # 13) rc57 配置面：预设入口置顶 + 默认预算下调
         schema = json.load(open(os.path.join(BASE, "_conf_schema.json"), encoding="utf-8"))
-        check("rc57 预设同步置顶", next(iter(schema)) == "presetSync", str(list(schema)[:3]))
+        check("rc57 模型中心置顶", next(iter(schema)) == "model", str(list(schema)[:3]))
         runtime = schema["runtime"]["items"]
         check("rc57 上下文默认 17 条", runtime["contextEntryLimit"]["default"] == 17, str(runtime["contextEntryLimit"]))
         check("rc57 时间窗默认 6 分钟", runtime["contextTimeWindowMinutes"]["default"] == 6, str(runtime["contextTimeWindowMinutes"]))

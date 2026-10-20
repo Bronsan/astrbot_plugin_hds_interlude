@@ -1,47 +1,6 @@
 {
-  "presetSync": {
-    "description": "【预设入口】Type0 预设：插件加载时直连分享站拉取预设；配置分区写回配置，角色人设仅在勾选“应用到当前故事”时写入当前故事。",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用预设同步，需填写分享码。",
-        "type": "bool",
-        "default": false
-      },
-      "baseUrl": {
-        "description": "分享站地址。",
-        "type": "string",
-        "default": "https://typ0.space"
-      },
-      "shareCode": {
-        "description": "分享码（也可直接粘贴完整链接到上一项）。",
-        "type": "string",
-        "default": ""
-      },
-      "shareUrl": {
-        "description": "完整分享链接（可选，优先级高于分享码；支持 /p/<code> 或 ?code=）。",
-        "type": "string",
-        "default": ""
-      },
-      "autoUpdate": {
-        "description": "插件加载时直连分享站检查 revision，有新版本才应用（首次导入也会执行）。",
-        "type": "bool",
-        "default": false
-      },
-      "sections": {
-        "description": "要同步的分区（留空 = 预设里有什么就同步什么）。可选：storyDefaults（仅在勾选“应用到当前故事”时生效）、runtime、urge、agency、memory、alterSystem、schedulePreplan、timelineDirector、chatActions、stickers、sharedStory、browser、worldSeeder、weather、longHorizon、qzone、blindMode、logging。",
-        "type": "list",
-        "default": []
-      },
-      "applyToCurrentStory": {
-        "description": "同时把 storyDefaults 应用到当前运行中的故事（不写回配置页）。",
-        "type": "bool",
-        "default": false
-      }
-    }
-  },
   "model": {
-    "description": "【必填 2】模型中心：连接、用途路由与主叙事参数。",
+    "description": "【必填 1】模型中心：连接、用途路由、采样/超时与视觉/音频/Embedding 参数；提示词内容在 WebUI「叙事提示词」。",
     "type": "object",
     "items": {
       "providersJson": {
@@ -229,7 +188,7 @@
         }
       },
       "compaction": {
-        "description": "后台压缩与侧端任务（时间导演/日程共用路由）。",
+        "description": "后台压缩与侧端任务（时间导演/日程共用路由）；压缩提示词在 WebUI「叙事提示词」。",
         "type": "object",
         "items": {
           "enabled": {
@@ -276,7 +235,7 @@
     }
   },
   "onebot": {
-    "description": "【必填 3】QQ / OneBot 接入：机器人账号、私聊白名单与群聊白名单。",
+    "description": "【必填 2】QQ / OneBot 接入：机器人账号、私聊白名单与群聊白名单。",
     "type": "object",
     "items": {
       "enabled": {
@@ -322,7 +281,7 @@
     }
   },
   "sharedStory": {
-    "description": "【结构 4】共享主剧本：多人参与、跨账号行为与管理员权限。",
+    "description": "【结构 3】共享主剧本：多人参与、跨账号行为与管理员权限。",
     "type": "object",
     "items": {
       "autoEnrollParticipants": {
@@ -358,7 +317,7 @@
     }
   },
   "runtime": {
-    "description": "【节奏 5】运行时：消息合并、打字、失败重试与自动生活推进。",
+    "description": "【节奏 4】运行时：消息合并、分段、打字、重试、自动生活推进与上下文预算。",
     "type": "object",
     "items": {
       "captureDirectMessages": {
@@ -558,7 +517,7 @@
     }
   },
   "urge": {
-    "description": "【节奏 6】Urge 弹性推进：按生活节奏、对话密度、休息窗口与 burst 窗口计算下一次推进。总开关仍是 runtime.autoAdvanceEnabled。",
+    "description": "【节奏 5】Urge 弹性推进：按生活节奏、对话密度、休息窗口与 burst 窗口计算下一次推进；总开关仍是 runtime.autoAdvanceEnabled。",
     "type": "object",
     "items": {
       "enabled": {
@@ -676,7 +635,7 @@
     }
   },
   "schedulePreplan": {
-    "description": "【节奏 7】日程预排：近期稳定日程与变化颗粒度；主提示词只读取未来约半天。",
+    "description": "【节奏 6】日程预排：近期稳定日程与变化颗粒度；主提示词只读取未来约半天。",
     "type": "object",
     "items": {
       "enabled": {
@@ -722,7 +681,7 @@
     }
   },
   "timelineDirector": {
-    "description": "【节奏 8】时间导演：自动回合先生成相对时间账本，再交给主叙事写作；失败时自动降级。",
+    "description": "【节奏 7】时间导演：自动回合先生成相对时间账本，再交给主叙事写作；失败时自动降级。",
     "type": "object",
     "items": {
       "enabled": {
@@ -733,7 +692,7 @@
     }
   },
   "agency": {
-    "description": "【节奏 9】Agency 行动窗口：日程压力、隐私、设备与生活来源的联系条件。",
+    "description": "【节奏 8】Agency 行动窗口：日程压力、隐私、设备与生活来源的联系条件。",
     "type": "object",
     "items": {
       "enabled": {
@@ -784,7 +743,7 @@
     }
   },
   "chatActions": {
-    "description": "【表达 10】聊天动作：原生小表情、本地表情包、群消息回应（需适配器支持 set_msg_emoji_like）。",
+    "description": "【表达 9】聊天动作：引用回复、消息回应与原生小表情（需适配器支持）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -838,7 +797,7 @@
     }
   },
   "stickers": {
-    "description": "【表达 11】本地表情包：扫描目录并把真实 assetId 提供给主模型（按文件名/相对路径匹配）。",
+    "description": "【表达 10】本地表情包：扫描目录并把真实 assetId 提供给主模型。",
     "type": "object",
     "items": {
       "enabled": {
@@ -869,7 +828,7 @@
     }
   },
   "memory": {
-    "description": "【内在 12】记忆与连续性：场景压缩、事实召回、剧情余波和设定演化。",
+    "description": "【内在 11】记忆与连续性：场景压缩、事实召回、剧情余波与设定演化参数；压缩提示词在 WebUI「叙事提示词」。",
     "type": "object",
     "items": {
       "enabled": {
@@ -896,11 +855,6 @@
         "description": "每次主叙事请求附带的最近原始条目数。",
         "type": "int",
         "default": 30
-      },
-      "factLimit": {
-        "description": "每次主叙事请求附带的长期事实数。",
-        "type": "int",
-        "default": 20
       },
       "compactionEntryLimit": {
         "description": "压缩模型单次读取的最大剧本条目数。",
@@ -1050,7 +1004,7 @@
     }
   },
   "alterSystem": {
-    "description": "【内在 13】Alter 情绪：低频氛围偏移、动态阈值与侧端分析。",
+    "description": "【内在 12】Alter 情绪：低频氛围偏移、动态阈值与侧端分析参数；Alter 提示词在 WebUI「叙事提示词」。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1111,7 +1065,7 @@
     }
   },
   "browser": {
-    "description": "【扩展 14】网页观察：内置 httpx 搜索/访问、正文提取与缓存，不依赖外部浏览器服务。",
+    "description": "【扩展 13】网页观察：内置 httpx 搜索/访问、正文提取与缓存。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1171,7 +1125,7 @@
     }
   },
   "worldSeeder": {
-    "description": "【扩展 15】世界事件播种器：后台低频生成与主角有关的外部事件。",
+    "description": "【扩展 14】世界事件播种器：后台低频生成与主角有关的外部事件。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1217,7 +1171,7 @@
     }
   },
   "weather": {
-    "description": "【扩展 16】运行时天气：Open-Meteo 真实天气 → [世界事件] 注入（默认关闭）。",
+    "description": "【扩展 15】运行时天气：Open-Meteo 真实天气 → [世界事件] 注入（默认关闭）。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1252,39 +1206,8 @@
       }
     }
   },
-  "longHorizon": {
-    "description": "【扩展 17】长线叙事指导（保留项：本移植未迁移，见 README）。",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "总开关（首版保留配置，行为未接入）。",
-        "type": "bool",
-        "default": false
-      },
-      "triggerScore": {
-        "description": "首次生成加权分数门槛。",
-        "type": "int",
-        "default": 25
-      },
-      "reviewIncrement": {
-        "description": "复审所需再积累分数。",
-        "type": "int",
-        "default": 40
-      },
-      "intensity": {
-        "description": "指导强度。",
-        "type": "string",
-        "options": [
-          "subtle",
-          "moderate",
-          "strong"
-        ],
-        "default": "subtle"
-      }
-    }
-  },
   "qzone": {
-    "description": "【扩展 18】QQ 空间通道（保留项：需要 SnowLuma 兼容连接，AstrBot 平台层默认不可用）。",
+    "description": "【扩展 16】QQ 空间通道：需要 SnowLuma 兼容连接，AstrBot 平台层默认不可用。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1320,7 +1243,7 @@
     }
   },
   "blindMode": {
-    "description": "【维护 19】盲区模式：沉浸运行，命令静默与最小健康心跳。",
+    "description": "【维护 17】盲区模式：沉浸运行，命令静默与最小健康心跳。",
     "type": "object",
     "items": {
       "enabled": {
@@ -1336,7 +1259,7 @@
     }
   },
   "logging": {
-    "description": "【维护 20】日志：级别阈值与内容预览开关（输出仍经 AstrBot logger）。",
+    "description": "【维护 18】日志：级别阈值与内容预览开关（输出仍经 AstrBot logger）。",
     "type": "object",
     "items": {
       "level": {

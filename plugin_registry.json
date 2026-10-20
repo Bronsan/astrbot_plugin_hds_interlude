@@ -4,7 +4,7 @@
     "display_name": "HDS Interlude / 幕间系统",
     "short_desc": "时间感知的持续叙事聊天框架（上游 Koishi 版 hds-interlude rc57 移植）。",
     "desc": "时间感知的持续叙事聊天框架（HDS Interlude）AstrBot 移植版。用户消息只是角色生活里的一件事：她会补写从上次到现在的生活，再决定看见、沉默、回复、延迟回复或在合适时机主动开口。",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "author": "Bronsan",
     "repo": "https://github.com/Bronsan/astrbot_plugin_hds_interlude",
     "social_link": "https://github.com/Bronsan",

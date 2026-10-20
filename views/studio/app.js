@@ -1075,6 +1075,23 @@ function renderImport() {
       </div>
     </div>
 
+    <div class="section-title"><h2>Type0 自动同步</h2><span>WebUI 内配置，插件加载时自动检查</span></div>
+    <div class="card" style="padding:20px">
+      <div class="grid grid-2">
+        <div class="field"><label class="switch"><input type="checkbox" id="preset-enabled" /><span class="track"></span><span>启用自动同步</span></label></div>
+        <div class="field"><label class="switch"><input type="checkbox" id="preset-auto" /><span class="track"></span><span>插件加载时检查更新</span></label></div>
+        <div class="field span-2"><label>分享站地址</label><input class="input" id="preset-base" placeholder="https://typ0.space" /></div>
+        <div class="field span-2"><label>分享码 / 完整链接</label><input class="input" id="preset-code" placeholder="ABCD-1234 或 https://typ0.space/p/ABCD-1234" /></div>
+        <div class="field span-2"><label>同步分区（逗号分隔，留空 = 全部）</label><input class="input" id="preset-sections" placeholder="runtime, urge, memory" /></div>
+        <div class="field"><label class="switch"><input type="checkbox" id="preset-apply" /><span class="track"></span><span>应用到当前故事</span></label></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button class="btn btn-primary" id="preset-save">保存自动同步设置</button>
+        <button class="btn" id="preset-run">立即同步</button>
+      </div>
+      <div class="notice info" style="margin-top:14px">自动同步只写配置分区与当前故事设定；角色卡、世界书与提示词仍由本页导入与编辑器管理。</div>
+    </div>
+
     <div class="section-title"><h2>文件导入</h2><span>酒馆 V2 JSON / PNG · World Info JSON</span></div>
     <div class="import-grid">
       <label class="dropzone" id="drop-character">
@@ -1104,6 +1121,61 @@ function renderImport() {
 function bindImportPage() {
   bindDropzone($('#drop-character'), 'character');
   bindDropzone($('#drop-lorebook'), 'lorebook');
+  bindPresetSync();
+}
+
+function bindPresetSync() {
+  const preset = state.data.presetSync || {};
+  const enabled = $('#preset-enabled');
+  if (!enabled) return;
+  enabled.checked = !!preset.enabled;
+  $('#preset-auto').checked = !!preset.autoUpdate;
+  $('#preset-base').value = preset.baseUrl || (state.data.meta.defaultShareBase || 'https://typ0.space');
+  $('#preset-code').value = preset.shareUrl || preset.shareCode || '';
+  $('#preset-sections').value = Array.isArray(preset.sections) ? preset.sections.join(', ') : '';
+  $('#preset-apply').checked = !!preset.applyToCurrentStory;
+
+  $('#preset-save').addEventListener('click', async () => {
+    const raw = $('#preset-code').value.trim();
+    const isUrl = /^https?:\/\//i.test(raw);
+    const sections = $('#preset-sections').value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    try {
+      setSaveState('saving', '保存中…');
+      const result = await api('preset.sync.save', {
+        presetSync: {
+          enabled: $('#preset-enabled').checked,
+          baseUrl: $('#preset-base').value.trim(),
+          shareUrl: isUrl ? raw : '',
+          shareCode: isUrl ? '' : raw,
+          autoUpdate: $('#preset-auto').checked,
+          sections,
+          applyToCurrentStory: $('#preset-apply').checked,
+        },
+      });
+      state.data = result.state;
+      setSaveState('idle', '已保存');
+      toast('自动同步设置已保存');
+    } catch (error) {
+      setSaveState('error', '保存失败');
+      toast(error.message || String(error), 'error');
+    }
+  });
+
+  $('#preset-run').addEventListener('click', async () => {
+    try {
+      setSaveState('saving', '同步中…');
+      const result = await api('preset.sync.run', { force: true });
+      state.data = result.state;
+      setSaveState('idle', '已同步');
+      toast(result.message || (result.applied ? '已同步' : '没有新版本'));
+    } catch (error) {
+      setSaveState('error', '同步失败');
+      toast(error.message || String(error), 'error');
+    }
+  });
 }
 
 async function previewType0FromImportPage() {
@@ -1196,7 +1268,7 @@ function renderAbout() {
         <div class="kv"><span>模型连接 / API Key</span><span>插件配置 → 模型中心</span></div>
         <div class="kv"><span>QQ / OneBot 账号</span><span>插件配置 → QQ 接入</span></div>
         <div class="kv"><span>运行节奏 / 记忆 / 浏览器</span><span>插件配置</span></div>
-        <div class="kv"><span>Type0 自动同步</span><span>插件配置 → presetSync</span></div>
+        <div class="kv"><span>Type0 自动同步</span><span>WebUI → 导入中心</span></div>
       </div>
       <div class="card" style="padding:20px">
         <h2 style="font-size:15px;margin:0 0 10px">WebUI 管理什么</h2>
@@ -1214,7 +1286,7 @@ function renderAbout() {
       <div class="kv"><span>世界书格式</span><span>World Info JSON；entries 对象或数组</span></div>
       <div class="kv"><span>Type0</span><span>/api/preset/&lt;code&gt;（含自动回退路径）</span></div>
       <div class="notice info" style="margin-top:14px">
-        修改内容后无需重载插件：服务层每次读取配置时都会叠加 WebUI 内容。删除 content.json 即可回到配置页回退值。
+        修改内容后无需重载插件：服务层每次读取配置时都会叠加 WebUI 内容。删除 content.json 即清空 WebUI 内容（角色/世界书/提示词/自动同步），叙事回退内置默认。
       </div>
     </div>
   `;

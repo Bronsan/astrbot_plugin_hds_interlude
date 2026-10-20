@@ -896,6 +896,7 @@ class ContentStore:
             "active": {"characterId": "", "lorebookIds": []},
             "bindings": {},
             "prompts": {},
+            "presetSync": {},
             "updatedAt": _now_text(),
         }
 
@@ -954,6 +955,18 @@ class ContentStore:
             for key, value in prompts.items()
             if key in PROMPT_KEYS and value is not None and str(value).strip()
         }
+        preset_sync = data.get("presetSync") if isinstance(data.get("presetSync"), dict) else {}
+        if preset_sync:
+            result["presetSync"] = {
+                "enabled": bool(preset_sync.get("enabled")),
+                "baseUrl": str(preset_sync.get("baseUrl") or ""),
+                "shareUrl": str(preset_sync.get("shareUrl") or ""),
+                "shareCode": str(preset_sync.get("shareCode") or ""),
+                "autoUpdate": bool(preset_sync.get("autoUpdate")),
+                "sections": _list_of_text(preset_sync.get("sections")),
+                "applyToCurrentStory": bool(preset_sync.get("applyToCurrentStory")),
+                "updatedAt": str(preset_sync.get("updatedAt") or ""),
+            }
         result["updatedAt"] = str(data.get("updatedAt") or _now_text())
         return result
 
@@ -1115,6 +1128,41 @@ class ContentStore:
                     self._data["prompts"][key] = str(value)
             self._save_locked()
             return dict(self._data["prompts"])
+
+    def preset_sync(self) -> Dict[str, Any]:
+        """Type0 自动同步设置（WebUI 管理；空对象表示尚未配置）。"""
+        with self._lock:
+            value = self._data.get("presetSync")
+            return dict(value) if isinstance(value, dict) else {}
+
+    def save_preset_sync(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(patch, dict):
+            raise ContentError("presetSync 必须是对象")
+        allowed = (
+            "enabled",
+            "baseUrl",
+            "shareUrl",
+            "shareCode",
+            "autoUpdate",
+            "sections",
+            "applyToCurrentStory",
+        )
+        with self._lock:
+            current = dict(self._data.get("presetSync") or {})
+            for key in allowed:
+                if key not in patch:
+                    continue
+                value = patch[key]
+                if key in ("enabled", "autoUpdate", "applyToCurrentStory"):
+                    current[key] = bool(value)
+                elif key == "sections":
+                    current[key] = _list_of_text(value)
+                else:
+                    current[key] = str(value or "").strip()
+            current["updatedAt"] = _now_text()
+            self._data["presetSync"] = current
+            self._save_locked()
+            return dict(current)
 
     # -- 查询 ------------------------------------------------------------ #
     def active_character(self) -> Optional[Dict[str, Any]]:

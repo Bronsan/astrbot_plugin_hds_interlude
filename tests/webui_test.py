@@ -191,6 +191,29 @@ def test_png_card_roundtrip() -> None:
     print("png card roundtrip ok")
 
 
+def test_preset_sync_store() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ContentStore(tmp)
+        assert store.preset_sync() == {}
+        saved = store.save_preset_sync({
+            "enabled": True,
+            "baseUrl": "https://example.test",
+            "shareUrl": "https://example.test/p/ABCD-1234",
+            "shareCode": "",
+            "autoUpdate": True,
+            "sections": ["runtime", "urge"],
+            "applyToCurrentStory": True,
+        })
+        assert saved["enabled"] is True
+        assert saved["shareUrl"].endswith("ABCD-1234")
+        assert saved["sections"] == ["runtime", "urge"]
+        assert saved["updatedAt"]
+        reloaded = ContentStore(tmp)
+        assert reloaded.preset_sync()["autoUpdate"] is True
+        assert reloaded.preset_sync()["sections"] == ["runtime", "urge"]
+        print("preset sync store ok")
+
+
 async def test_store_and_api() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = ContentStore(tmp)
@@ -202,6 +225,8 @@ async def test_store_and_api() -> None:
             default_base="https://typ0.space",
         )
         # Type0 预览
+        state = await api.state()
+        assert isinstance(state["presetSync"], dict)
         preview = await api.dispatch("type0.preview", {"code": "ABCD-1234"})
         assert preview["card"]["name"] == "林晚"
         assert preview["mapping"]
@@ -300,6 +325,7 @@ async def main() -> None:
     test_lorebook_normalize_and_activation()
     test_type0_mapping()
     test_png_card_roundtrip()
+    test_preset_sync_store()
     await test_store_and_api()
     print("webui tests passed")
 

@@ -60,7 +60,7 @@ from .core.timeutil import format_log_time, format_story_display_time
 from .core.types import DeliveryUnknown, now_utc, to_iso
 
 PLUGIN_NAME = "astrbot_plugin_hds_interlude"
-PLUGIN_VERSION = "0.3.2"
+PLUGIN_VERSION = "0.3.3"
 
 #: 单次平台投递的回执等待上限（对应上游 withTransportTimeout 的 30 秒）。
 TRANSPORT_TIMEOUT_SECONDS = 30
@@ -517,6 +517,7 @@ class HDSInterludePlugin(Star):
             self.content_store,
             story_lister=self._studio_story_list,
             story_applier=self._studio_apply_story,
+            preset_runner=self._studio_run_preset_sync,
             default_base=self._type0_share_base(),
             logger=self._log,
         )
@@ -564,9 +565,25 @@ class HDSInterludePlugin(Star):
             return raw
 
     def _type0_share_base(self) -> str:
-        sync = self._config_section("presetSync")
+        sync = self._preset_sync_config()
         base = str(sync.get("baseUrl") or "").strip()
         return base or "https://typ0.space"
+
+    def _preset_sync_config(self) -> Dict[str, Any]:
+        """Type0 自动同步设置：WebUI 内容库优先，旧配置项作回退。"""
+        merged = dict(self._config_section("presetSync"))
+        try:
+            content = self.content_store.preset_sync()
+        except Exception as error:  # noqa: BLE001 - 内容层异常不能拖垮同步
+            self._log("warn", f"读取 WebUI 自动同步设置失败：{error}")
+            content = {}
+        if content:
+            merged.update(content)
+        return merged
+
+    async def _studio_run_preset_sync(self, force: bool = False) -> Tuple[bool, str]:
+        """WebUI「立即同步」入口：不依赖消息事件。"""
+        return await self._run_preset_sync(None, None, force=force)
 
     async def _studio_story_list(self) -> List[Dict[str, Any]]:
         try:
@@ -676,7 +693,7 @@ class HDSInterludePlugin(Star):
         不再依赖 typ-0 桌面端或任何外部平台：只读 `presetSync` 配置，
         通过 HTTP 直接访问 `baseUrl`，按 revision 去重后写入本地配置。
         """
-        sync = self._config_section("presetSync")
+        sync = self._preset_sync_config()
         if not sync.get("enabled") or not sync.get("autoUpdate"):
             return
         code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
@@ -1880,13 +1897,13 @@ class HDSInterludePlugin(Star):
     async def _cmd_preset_sync(self, event: AstrMessageEvent, session: SessionView, args: str) -> str:
         if not self._require_manager(session):
             return NO_MANAGER
-        sync = self._config_section("presetSync")
+        sync = self._preset_sync_config()
         code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
         if not sync.get("enabled") or not code:
             return "\n".join([
                 "Type0 预设导入未启用。",
-                "请在「插件配置 → 【预设入口】Type0 预设」中配置:",
-                "  1. 启用预设同步",
+                "请在「WebUI → 导入中心 → Type0 自动同步」中配置:",
+                "  1. 启用自动同步",
                 "  2. 填写分享码或完整分享链接",
                 f"  3.{' 加载时自动导入已开启' if sync.get('autoUpdate') else ' 加载时自动导入未开启（仅手动触发）'}",
                 "",
@@ -1911,7 +1928,7 @@ class HDSInterludePlugin(Star):
         `session=None` 表示插件加载时的内置导入：此时不依赖任何消息事件，
         故事级应用回落到 canonical story。
         """
-        sync = self._config_section("presetSync")
+        sync = self._preset_sync_config()
         code = extract_share_code(sync.get("shareUrl") or sync.get("shareCode"))
         base_url = str(sync.get("baseUrl") or "").strip() or default_share_base()
         if not sync.get("enabled") or not code:
